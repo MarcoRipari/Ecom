@@ -11,3 +11,12 @@ openpyxl
 requests
 holidays
 babel
+gspread
+google-auth
+google-auth-oauthlib
+google-auth-httplib2
+google-api-python-client
+gspread-formatting
+pydrive2
+dropbox
+reportlab
