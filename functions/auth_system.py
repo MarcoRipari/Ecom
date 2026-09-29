@@ -47,8 +47,7 @@ def _messaggio_errore_italiano(e: Exception) -> str:
     return f"❌ Si è verificato un errore imprevisto: {e}"
 
 def login(identificativo: str, password: str) -> str | bool:
-    """Effettua il login con username OPPURE email. Se l'utente ha la 2FA attiva,
-    restituisce 'MFA_REQUIRED' e salva le informazioni in session_state per il secondo fattore."""
+    """Effettua il login con username OPPURE email ed esegue l'AAL Check di Supabase per la 2FA."""
     client, admin = get_supabase_clients()
     if not client:
         st.error("❌ Connessione al database non disponibile.")
@@ -61,11 +60,12 @@ def login(identificativo: str, password: str) -> str | bool:
             st.error("❌ Inserisci username/email e password.")
             return False
 
+        # 1. Risoluzione email se l'utente ha inserito lo username
         if "@" in identificativo:
             email = identificativo
         else:
             try:
-                res_profile = client.table("profiles").select("*").ilike("username", identificativo).execute()
+                res_profile = client.table("profiles").select("user_id").ilike("username", identificativo).execute()
             except Exception as e:
                 st.error(_messaggio_errore_italiano(e))
                 return False
@@ -86,6 +86,7 @@ def login(identificativo: str, password: str) -> str | bool:
                 st.error("❌ Nessuna email associata a questo username.")
                 return False
 
+        # 2. Authenticate user -> ottiene sessione AAL1
         try:
             res = client.auth.sign_in_with_password({"email": email, "password": password})
         except Exception as e:
@@ -96,6 +97,7 @@ def login(identificativo: str, password: str) -> str | bool:
             st.error("❌ Username/email o password errati.")
             return False
 
+        # 3. Recupera dati del profilo utente
         try:
             res_profile2 = client.table("profiles").select("*").eq("user_id", res.user.id).execute()
         except Exception as e:
@@ -103,7 +105,7 @@ def login(identificativo: str, password: str) -> str | bool:
             return False
 
         if not res_profile2.data:
-            st.error("❌ Accesso riuscito ma profilo utente non trovato. Contatta un amministratore.")
+            st.error("❌ Accesso riuscito ma profilo utente non trovato.")
             return False
 
         profilo = res_profile2.data[0]
@@ -116,15 +118,26 @@ def login(identificativo: str, password: str) -> str | bool:
             "role": profilo.get("role", "guest"),
         }
 
-        # Controllo dei fattori 2FA registrati su Supabase Auth
+        # 4. AAL CHECK (Authenticators Assurance Level Check)
+        # Recupera il livello di garanzia corrente (aal1 vs aal2) e i fattori verificati
+        mfa_data = client.auth.mfa.get_authenticator_assurance_level()
+        current_level = getattr(mfa_data, "current_level", "aal1")
+        next_level = getattr(mfa_data, "next_level", "aal1")
+
+        # Elenca i fattori associati all'utente corrente
         factors_res = client.auth.mfa.list_factors()
-        verified_factors = [f for f in getattr(factors_res, 'totp', []) if getattr(f, 'status', '') == 'verified']
+        totp_factors = [f for f in getattr(factors_res, 'totp', []) if getattr(f, 'status', '') == 'verified']
 
-        if verified_factors:
-            st.session_state.mfa_pending_user = user_data
-            st.session_state.mfa_factor_id = verified_factors[0].id
-            return "MFA_REQUIRED"
+        # Se il livello richiesto è aal2 (o ci sono fattori TOTP verificati e siamo ancora a livello aal1)
+        if (next_level == "aal2" or totp_factors) and current_level != "aal2":
+            factor_id = totp_factors[0].id if totp_factors else getattr(mfa_data, "next_factor_id", None)
+            
+            if factor_id:
+                st.session_state.mfa_pending_user = user_data
+                st.session_state.mfa_factor_id = factor_id
+                return "MFA_REQUIRED"
 
+        # Nessuna 2FA richiesta o già verificata a livello aal2
         st.session_state.user = user_data
         st.session_state.user["mfa_verified"] = True
         return True
