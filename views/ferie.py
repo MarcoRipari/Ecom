@@ -19,6 +19,7 @@ from functions.ferie_db import (
     time_slider,
     update_dipendente_budget,
     update_orario_dipendente,
+    add_ferie_record,
     MESI_IT_LUNGO
 )
 
@@ -187,38 +188,63 @@ def ferie():
             )
 
 def aggiungi_ferie():
-    st.header("Aggiungi ferie")
+    st.header("Aggiungi ferie / Permesso")
 
     dipendenti = get_dipendenti()
     nomi_dipendenti = dipendenti['NOME'].tolist()
 
+    modalita = st.radio(
+        "Tipo di inserimento",
+        ["Giorno intero", "Entrata posticipata / Uscita anticipata"],
+        horizontal=True
+    )
+
     nome = st.selectbox("Nome Dipendente", options=nomi_dipendenti)
-    col1, col2 = st.columns(2)
-    with col1:
-        data_inizio = st.date_input("Data inizio", format="DD/MM/YYYY")
-    with col2:
-        data_fine = st.date_input("Data fine", format="DD/MM/YYYY")
 
-    if data_inizio <= data_fine:
-        sovrapposizioni = check_overlaps(data_inizio, data_fine, escludi_nome=nome)
-        if sovrapposizioni:
-            st.warning(f"⚠️ **Attenzione:** Nelle date selezionate sono già in ferie: {', '.join(sovrapposizioni)}")
+    if modalita == "Giorno intero":
+        col1, col2 = st.columns(2)
+        with col1:
+            data_inizio = st.date_input("Data inizio", format="DD/MM/YYYY")
+        with col2:
+            data_fine = st.date_input("Data fine", format="DD/MM/YYYY")
 
-    tipo = st.selectbox("Tipo di assenza", ["Ferie", "Rettifica", "Altro"])
+        if data_inizio <= data_fine:
+            sovrapposizioni = check_overlaps(data_inizio, data_fine, escludi_nome=nome)
+            if sovrapposizioni:
+                st.warning(f"⚠️ **Attenzione:** Nelle date selezionate sono già in ferie: {', '.join(sovrapposizioni)}")
 
-    if st.button("Inserisci ferie"):
-        if not nome:
-            st.error("Il campo 'Nome' è obbligatorio.")
-        elif data_fine < data_inizio:
-            st.error("Errore: la data di fine non può essere precedente alla data di inizio.")
-        else:
-            nuova_riga = [nome, data_inizio.strftime('%d-%m-%Y'), data_fine.strftime('%d-%m-%Y'), tipo]
-            upload = add_ferie(nuova_riga)
-            if upload is True:
-                st.success("Ferie inserite con successo!")
-                st.rerun()
+        tipo = st.selectbox("Tipo di assenza", ["Ferie", "Rettifica", "Altro"])
+
+        if st.button("Inserisci ferie"):
+            if not nome:
+                st.error("Il campo 'Nome' è obbligatorio.")
+            elif data_fine < data_inizio:
+                st.error("Errore: la data di fine non può essere precedente alla data di inizio.")
             else:
-                st.error(f"{upload}")
+                nuova_riga = [nome, data_inizio.strftime('%d-%m-%Y'), data_fine.strftime('%d-%m-%Y'), tipo]
+                upload = add_ferie(nuova_riga)
+                if upload is True:
+                    st.success("Ferie inserite con successo!")
+                    st.rerun()
+                else:
+                    st.error(f"{upload}")
+
+    else:
+        # Permesso orario / ritardo
+        riga_dip = dipendenti[dipendenti['NOME'] == nome].iloc[0]
+        orario = get_orario_dipendente(riga_dip)
+        ore_prev = ore_giornaliere_previste(orario)
+
+        st.caption(f"Orario previsto per **{nome}**: {ore_prev:g} ore/giorno.")
+        data_giorno = st.date_input("Data del permesso", format="DD/MM/YYYY")
+        ore_permesso = st.number_input("Ore di permesso / ritardo da scalare", min_value=0.5, max_value=8.0, step=0.5, value=2.0)
+        dettaglio_txt = st.text_input("Dettaglio (es. Entrata posticipata / Visita medica)", value="Permesso Orario")
+
+        if st.button("Inserisci Permesso Orario"):
+            frazione = round(ore_permesso / ore_prev, 4) if ore_prev > 0 else 0.25
+            add_ferie_record(nome, data_giorno.strftime('%d/%m/%Y'), data_giorno.strftime('%d/%m/%Y'), "Permesso Orario", frazione, dettaglio_txt)
+            st.success(f"Permesso di {ore_permesso}h inserito con successo per {nome}!")
+            st.rerun()
 
 @st.dialog("Modifica Dipendente")
 def modifica_ferie_totali_modal(nome, ferie_attuale, orario_attuale):

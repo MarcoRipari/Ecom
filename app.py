@@ -3,6 +3,7 @@ import re
 import os
 import importlib.util
 from core import app_db, auth
+from reports.bi_selector import render_bi_period_selector
 
 # Page Configuration
 st.set_page_config(
@@ -84,7 +85,6 @@ with st.sidebar:
 # Define Navigation Menu according to Role
 role = (user.get("role", "guest") if user else "guest").lower()
 
-# Menu structure with collapsible sections
 menu_structure = []
 
 # 1. Main Dashboard
@@ -92,7 +92,7 @@ menu_structure.append({
     "section": "📌 Principale",
     "icon": "house",
     "items": [
-        {"name": "Dashboard Utente", "icon": "speedometer", "roles": ["admin", "logistica", "customer care", "dipendente", "guest"]}
+        {"name": "Dashboard Utente", "roles": ["admin", "logistica", "customer care", "dipendente", "guest"]}
     ]
 })
 
@@ -100,55 +100,76 @@ menu_structure.append({
 if role in ["admin", "logistica", "customer care", "guest"]:
     menu_structure.append({
         "section": "📊 Reports & BI",
-        "icon": "bar-chart",
         "items": [
-            {"name": "Carica Dati BI", "icon": "upload", "script": "reports/00_Carica_Dati.py", "roles": ["admin", "logistica", "customer care"]},
-            {"name": "Dashboard BI", "icon": "graph-up", "script": "reports/01_Dashboard.py", "roles": ["admin", "logistica", "customer care", "guest"]},
-            {"name": "Y2Y Generale", "icon": "pie-chart", "script": "reports/02_Y2Y_Generale.py", "roles": ["admin", "logistica", "customer care"]},
-            {"name": "Y2Y Collezioni", "icon": "diagram-3", "script": "reports/03_Y2Y_Collezioni.py", "roles": ["admin", "logistica", "customer care"]},
-            {"name": "Y2Y Codici", "icon": "123", "script": "reports/04_Y2Y_Codici.py", "roles": ["admin", "logistica", "customer care"]},
-            {"name": "Carryover", "icon": "arrow-repeat", "script": "reports/05_Carryover.py", "roles": ["admin", "logistica", "customer care"]},
-            {"name": "Taglie", "icon": "box-seam", "script": "reports/06_Taglie.py", "roles": ["admin", "logistica", "customer care"]},
-            {"name": "Analisi Resi", "icon": "arrow-return-left", "script": "reports/07_Analisi_Resi.py", "roles": ["admin", "logistica", "customer care"]},
-            {"name": "Log Riconciliazione", "icon": "journal-text", "script": "reports/08_Log_Riconciliazione.py", "roles": ["admin", "logistica", "customer care"]},
-            {"name": "Sell Through", "icon": "bag-check", "script": "reports/09_Sell_Through.py", "roles": ["admin", "logistica", "customer care"]},
-            {"name": "Nazioni", "icon": "globe", "script": "reports/10_Nazioni.py", "roles": ["admin", "logistica", "customer care"]}
+            {"name": "Carica Dati BI", "script": "reports/00_Carica_Dati.py", "roles": ["admin", "logistica", "customer care"]},
+            {"name": "Dashboard BI", "script": "reports/01_Dashboard.py", "roles": ["admin", "logistica", "customer care", "guest"]},
+            {"name": "Y2Y Generale", "script": "reports/02_Y2Y_Generale.py", "roles": ["admin", "logistica", "customer care"]},
+            {"name": "Y2Y Collezioni", "script": "reports/03_Y2Y_Collezioni.py", "roles": ["admin", "logistica", "customer care"]},
+            {"name": "Y2Y Codici", "script": "reports/04_Y2Y_Codici.py", "roles": ["admin", "logistica", "customer care"]},
+            {"name": "Carryover", "script": "reports/05_Carryover.py", "roles": ["admin", "logistica", "customer care"]},
+            {"name": "Taglie", "script": "reports/06_Taglie.py", "roles": ["admin", "logistica", "customer care"]},
+            {"name": "Analisi Resi", "script": "reports/07_Analisi_Resi.py", "roles": ["admin", "logistica", "customer care"]},
+            {"name": "Log Riconciliazione", "script": "reports/08_Log_Riconciliazione.py", "roles": ["admin", "logistica", "customer care"]},
+            {"name": "Sell Through", "script": "reports/09_Sell_Through.py", "roles": ["admin", "logistica", "customer care"]},
+            {"name": "Nazioni", "script": "reports/10_Nazioni.py", "roles": ["admin", "logistica", "customer care"]}
         ]
     })
 
-# 3. Operational Features (Catalogo, Giacenze, Foto, Ferie)
+# 3. Catalogo & Ordini
 if role in ["admin", "logistica", "customer care"]:
     menu_structure.append({
-        "section": "📦 Giacenze & Foto",
-        "icon": "boxes",
+        "section": "📋 Catalogo & Ordini",
         "items": [
-            {"name": "Importa Giacenze", "icon": "cloud-upload", "roles": ["admin", "logistica", "customer care"]},
-            {"name": "Dashboard Foto", "icon": "camera", "roles": ["admin", "logistica", "customer care"]}
+            {"name": "Aggiungi Ordini Stagione", "roles": ["admin", "logistica", "customer care"]},
+            {"name": "Genera Descrizioni", "roles": ["admin", "customer care"]},
+            {"name": "Genera Traduzioni", "roles": ["admin", "customer care"]}
         ]
     })
 
+# 4. Giacenze
+if role in ["admin", "logistica", "customer care"]:
+    menu_structure.append({
+        "section": "📦 Giacenze",
+        "items": [
+            {"name": "Importa Giacenze", "roles": ["admin", "logistica", "customer care"]},
+            {"name": "Aggiorna Anagrafica", "roles": ["admin", "logistica", "customer care"]}
+        ]
+    })
+
+# 5. Foto SKUs
+if role in ["admin", "logistica", "customer care"]:
+    menu_structure.append({
+        "section": "📸 Foto SKUs",
+        "items": [
+            {"name": "Dashboard Foto", "roles": ["admin", "logistica", "customer care"]},
+            {"name": "Riscatta SKU", "roles": ["admin", "logistica", "customer care"]},
+            {"name": "Aggiungi Prelevate", "roles": ["admin", "logistica", "customer care"]}
+        ]
+    })
+
+# 6. Ferie
 if role in ["admin", "dipendente"]:
     menu_structure.append({
         "section": "🌴 Gestione Ferie",
-        "icon": "calendar-event",
         "items": [
-            {"name": "Le Mie Ferie", "icon": "person-workspace", "roles": ["admin", "dipendente"]},
-            {"name": "Calendario Ferie", "icon": "calendar3", "roles": ["admin", "dipendente"]},
-            {"name": "Aggiungi Ferie", "icon": "plus-circle", "roles": ["admin"]},
-            {"name": "Gestione Dipendenti", "icon": "gear", "roles": ["admin"]}
+            {"name": "Le Mie Ferie", "roles": ["admin", "dipendente"]},
+            {"name": "Report Ferie", "roles": ["admin"]},
+            {"name": "Calendario Ferie", "roles": ["admin", "dipendente"]},
+            {"name": "Aggiungi Ferie / Permesso", "roles": ["admin"]},
+            {"name": "Gestione Dipendenti", "roles": ["admin"]}
         ]
     })
 
+# 7. Admin
 if role == "admin":
     menu_structure.append({
         "section": "⚙️ Amministrazione",
-        "icon": "shield-lock",
         "items": [
-            {"name": "Gestione Utenti", "icon": "person-plus", "roles": ["admin"]}
+            {"name": "Gestione Utenti", "roles": ["admin"]}
         ]
     })
 
-# Render Sidebar Collapsible Navigation
+# Render Sidebar Navigation
 with st.sidebar:
     st.markdown("### 📋 Navigation")
     for sec in menu_structure:
@@ -162,6 +183,11 @@ with st.sidebar:
                         st.session_state.selected_page = item["name"]
                         st.rerun()
 
+# If on BI Reports, render BI period selector in sidebar
+bi_page_names = [item["name"] for sec in menu_structure if sec["section"] == "📊 Reports & BI" for item in sec["items"]]
+if st.session_state.selected_page in bi_page_names:
+    render_bi_period_selector()
+
 # --- DYNAMIC PAGE ROUTING ---
 page_selected = st.session_state.selected_page
 
@@ -173,11 +199,15 @@ elif page_selected == "Le Mie Ferie":
     from views.ferie import dashboard_dipendente
     dashboard_dipendente()
 
+elif page_selected == "Report Ferie":
+    from views.ferie import ferie
+    ferie()
+
 elif page_selected == "Calendario Ferie":
     from views.ferie import calendario_ferie_mensile
     calendario_ferie_mensile()
 
-elif page_selected == "Aggiungi Ferie":
+elif page_selected == "Aggiungi Ferie / Permesso":
     from views.ferie import aggiungi_ferie
     aggiungi_ferie()
 
@@ -185,13 +215,37 @@ elif page_selected == "Gestione Dipendenti":
     from views.ferie import gestione_dipendenti
     gestione_dipendenti()
 
+elif page_selected == "Aggiungi Ordini Stagione":
+    from views.catalogo import catalogo_import_ordini
+    catalogo_import_ordini()
+
+elif page_selected == "Genera Descrizioni":
+    from views.descrizioni import genera_descrizioni
+    genera_descrizioni()
+
+elif page_selected == "Genera Traduzioni":
+    from views.traduzioni import genera_traduzioni
+    genera_traduzioni()
+
 elif page_selected == "Importa Giacenze":
     from views.giacenze import giacenze_importa
     giacenze_importa()
 
+elif page_selected == "Aggiorna Anagrafica":
+    from views.giacenze import aggiorna_anagrafica
+    aggiorna_anagrafica()
+
 elif page_selected == "Dashboard Foto":
     from views.foto import foto_dashboard
     foto_dashboard()
+
+elif page_selected == "Riscatta SKU":
+    from views.foto import foto_riscattare
+    foto_riscattare()
+
+elif page_selected == "Aggiungi Prelevate":
+    from views.foto import foto_aggiungi_prelevate
+    foto_aggiungi_prelevate()
 
 elif page_selected == "Gestione Utenti":
     st.subheader("⚙️ Aggiungi nuovo utente")
@@ -208,7 +262,6 @@ elif page_selected == "Gestione Utenti":
             auth.register_user(new_email, new_pass, nome=new_name, cognome=new_surname, username=new_username, role=new_role, mfa_enabled=mfa_opt)
 
 else:
-    # Execute Report Script dynamically if it's an EcomAnalysis report
     script_path = None
     for sec in menu_structure:
         for item in sec["items"]:
