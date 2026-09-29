@@ -206,7 +206,8 @@ def register_user(email: str, password: str, **param) -> bool:
         res = admin.auth.admin.create_user({
             "email": email,
             "password": password,
-            "email_confirm": True
+            "email_confirm": True,
+            "mfa_enabled": param.get("mfa_enabled", False)
         })
 
         if not res or not res.user:
@@ -220,7 +221,6 @@ def register_user(email: str, password: str, **param) -> bool:
             "cognome": param.get("cognome", ""),
             "username": param.get("username", ""),
             "role": param.get("role", "guest"),
-            "mfa_enabled": param.get("mfa_enabled", False)
         }
 
         admin.table("profiles").insert(profile).execute()
