@@ -59,7 +59,7 @@ def _messaggio_errore_italiano(e: Exception) -> str:
         return "❌ Sessione scaduta. Effettua di nuovo l'accesso."
     return f"❌ Si è verificato un errore imprevisto: {e}"
 
-def login(identificativo: str, password: str, mfa_code: str = None) -> bool:
+def login(identificativo: str, password: str, require_mfa: bool = True) -> bool:
     identificativo = (identificativo or "").strip()
     password = password or ""
     if not identificativo or not password:
@@ -71,29 +71,34 @@ def login(identificativo: str, password: str, mfa_code: str = None) -> bool:
     # Fallback for development / self-hosted without external secrets configured yet
     if not client:
         if (identificativo in ["admin", "admin@ecom.it"]) and password == "admin":
-            st.session_state.user = {
+            user_data = {
                 "email": "admin@ecom.it",
                 "username": "admin",
                 "nome": "Admin",
                 "cognome": "User",
-                "role": "admin",
-                "mfa_verified": True
+                "role": "admin"
             }
-            return True
         elif (identificativo in ["dipendente", "dipendente@ecom.it"]) and password == "dipendente":
-            st.session_state.user = {
+            user_data = {
                 "email": "dipendente@ecom.it",
                 "username": "dipendente",
                 "nome": "Mario",
                 "cognome": "Rossi",
-                "role": "dipendente",
-                "mfa_verified": True
+                "role": "dipendente"
             }
-            return True
         else:
             st.error("❌ Credenziali errate.")
             return False
 
+        if require_mfa:
+            st.session_state.mfa_pending_user = user_data
+            return "MFA_REQUIRED"
+        else:
+            st.session_state.user = user_data
+            st.session_state.user["mfa_verified"] = True
+            return True
+
+    # Supabase Production Auth Flow
     try:
         if "@" in identificativo:
             email = identificativo
@@ -120,26 +125,22 @@ def login(identificativo: str, password: str, mfa_code: str = None) -> bool:
             return False
 
         profilo = res_profile2.data[0]
-
-        mfa_required = profilo.get("mfa_enabled", False)
-        if mfa_required and not mfa_code:
-            st.session_state.mfa_pending_user = {
-                "email": email,
-                "username": profilo.get("username", ""),
-                "nome": profilo.get("nome", ""),
-                "cognome": profilo.get("cognome", ""),
-                "role": profilo.get("role", "guest"),
-            }
-            return "MFA_REQUIRED"
-
-        st.session_state.user = {
+        user_data = {
             "email": email,
             "username": profilo.get("username", ""),
             "nome": profilo.get("nome", ""),
             "cognome": profilo.get("cognome", ""),
             "role": profilo.get("role", "guest"),
-            "mfa_verified": True
         }
+
+        # Enforce 2FA OTP verification if enabled or required
+        mfa_required = require_mfa or profilo.get("mfa_enabled", False)
+        if mfa_required:
+            st.session_state.mfa_pending_user = user_data
+            return "MFA_REQUIRED"
+
+        st.session_state.user = user_data
+        st.session_state.user["mfa_verified"] = True
         return True
 
     except Exception as e:
@@ -163,12 +164,14 @@ def verify_2fa_code(otp_code: str) -> bool:
                 if verify:
                     st.session_state.user = pending_user
                     st.session_state.user["mfa_verified"] = True
-                    del st.session_state["mfa_pending_user"]
+                    if "mfa_pending_user" in st.session_state:
+                        del st.session_state["mfa_pending_user"]
                     return True
         except Exception as e:
             st.error(f"❌ Codice 2FA non valido: {e}")
             return False
 
+    # Dev/Fallback OTP verification (accepts valid 6 digit OTP)
     if otp_code and len(otp_code) == 6 and otp_code.isdigit():
         st.session_state.user = pending_user
         st.session_state.user["mfa_verified"] = True
@@ -176,7 +179,7 @@ def verify_2fa_code(otp_code: str) -> bool:
             del st.session_state["mfa_pending_user"]
         return True
     else:
-        st.error("❌ Codice 2FA non valido. Inserisci un codice a 6 cifre.")
+        st.error("❌ Codice 2FA non valido. Inserisci un codice OTP a 6 cifre.")
         return False
 
 def register_user(email: str, password: str, **param) -> bool:
@@ -220,7 +223,7 @@ def register_user(email: str, password: str, **param) -> bool:
             "cognome": param.get("cognome", ""),
             "username": param.get("username", ""),
             "role": param.get("role", "guest"),
-            "mfa_enabled": param.get("mfa_enabled", False)
+            "mfa_enabled": param.get("mfa_enabled", True)
         }
 
         admin.table("profiles").insert(profile).execute()
