@@ -1,5 +1,5 @@
-import streamlit as st
 import os
+import streamlit as st
 
 supabase = None
 supabase_admin = None
@@ -59,7 +59,7 @@ def _messaggio_errore_italiano(e: Exception) -> str:
         return "❌ Sessione scaduta. Effettua di nuovo l'accesso."
     return f"❌ Si è verificato un errore imprevisto: {e}"
 
-def login(identificativo: str, password: str, mfa_code: str = None) -> bool:
+def login(identificativo: str, password: str) -> str | bool:
     identificativo = (identificativo or "").strip()
     password = password or ""
     if not identificativo or not password:
@@ -68,7 +68,6 @@ def login(identificativo: str, password: str, mfa_code: str = None) -> bool:
 
     client, admin = get_supabase_clients()
 
-    # Fallback for development / self-hosted without external secrets configured yet
     if not client:
         if (identificativo in ["admin", "admin@ecom.it"]) and password == "admin":
             st.session_state.user = {
@@ -120,26 +119,27 @@ def login(identificativo: str, password: str, mfa_code: str = None) -> bool:
             return False
 
         profilo = res_profile2.data[0]
-
-        mfa_required = profilo.get("mfa_enabled", False)
-        if mfa_required and not mfa_code:
-            st.session_state.mfa_pending_user = {
-                "email": email,
-                "username": profilo.get("username", ""),
-                "nome": profilo.get("nome", ""),
-                "cognome": profilo.get("cognome", ""),
-                "role": profilo.get("role", "guest"),
-            }
-            return "MFA_REQUIRED"
-
-        st.session_state.user = {
+        
+        user_data = {
+            "id": res.user.id,
             "email": email,
             "username": profilo.get("username", ""),
             "nome": profilo.get("nome", ""),
             "cognome": profilo.get("cognome", ""),
             "role": profilo.get("role", "guest"),
-            "mfa_verified": True
         }
+
+        # Controllo dei fattori 2FA registrati su Supabase Auth
+        factors_res = client.auth.mfa.list_factors()
+        verified_factors = [f for f in getattr(factors_res, 'totp', []) if getattr(f, 'status', '') == 'verified']
+
+        if verified_factors:
+            st.session_state.mfa_pending_user = user_data
+            st.session_state.mfa_factor_id = verified_factors[0].id
+            return "MFA_REQUIRED"
+
+        st.session_state.user = user_data
+        st.session_state.user["mfa_verified"] = True
         return True
 
     except Exception as e:
@@ -148,36 +148,55 @@ def login(identificativo: str, password: str, mfa_code: str = None) -> bool:
 
 def verify_2fa_code(otp_code: str) -> bool:
     pending_user = st.session_state.get("mfa_pending_user")
-    if not pending_user:
-        st.error("Nessuna sessione di login in attesa di 2FA.")
+    factor_id = st.session_state.get("mfa_factor_id")
+    
+    if not pending_user or not factor_id:
+        st.error("❌ Nessuna sessione di login in attesa di 2FA.")
+        return False
+
+    otp_code = (otp_code or "").strip()
+    if not otp_code or len(otp_code) != 6 or not otp_code.isdigit():
+        st.error("❌ Inserisci un codice OTP valido a 6 cifre.")
         return False
 
     client, _ = get_supabase_clients()
     if client:
         try:
-            factors = client.auth.mfa.list_factors()
-            if factors and factors.totp:
-                factor_id = factors.totp[0].id
-                challenge = client.auth.mfa.challenge({"factor_id": factor_id})
-                verify = client.auth.mfa.verify({"factor_id": factor_id, "challenge_id": challenge.id, "code": otp_code})
-                if verify:
-                    st.session_state.user = pending_user
-                    st.session_state.user["mfa_verified"] = True
+            challenge_res = client.auth.mfa.challenge({"factor_id": factor_id})
+            challenge_id = challenge_res.id
+
+            verify_res = client.auth.mfa.verify({
+                "factor_id": factor_id,
+                "challenge_id": challenge_id,
+                "code": otp_code
+            })
+
+            if verify_res and getattr(verify_res, "access_token", None):
+                st.session_state.user = pending_user
+                st.session_state.user["mfa_verified"] = True
+                
+                if "mfa_pending_user" in st.session_state:
                     del st.session_state["mfa_pending_user"]
-                    return True
+                if "mfa_factor_id" in st.session_state:
+                    del st.session_state["mfa_factor_id"]
+                return True
+            else:
+                st.error("❌ Codice 2FA errato o scaduto.")
+                return False
+
         except Exception as e:
-            st.error(f"❌ Codice 2FA non valido: {e}")
+            st.error(_messaggio_errore_italiano(e))
             return False
 
-    if otp_code and len(otp_code) == 6 and otp_code.isdigit():
+    # Fallback solo se Supabase non è configurato (ambiente dev offline)
+    if pending_user.get("username") in ["admin", "dipendente"] and otp_code == "123456":
         st.session_state.user = pending_user
         st.session_state.user["mfa_verified"] = True
-        if "mfa_pending_user" in st.session_state:
-            del st.session_state["mfa_pending_user"]
+        del st.session_state["mfa_pending_user"]
         return True
-    else:
-        st.error("❌ Codice 2FA non valido. Inserisci un codice a 6 cifre.")
-        return False
+
+    st.error("❌ Codice 2FA non valido.")
+    return False
 
 def register_user(email: str, password: str, **param) -> bool:
     client, admin = get_supabase_clients()
@@ -206,8 +225,7 @@ def register_user(email: str, password: str, **param) -> bool:
         res = admin.auth.admin.create_user({
             "email": email,
             "password": password,
-            "email_confirm": True,
-            "mfa_enabled": param.get("mfa_enabled", False)
+            "email_confirm": True
         })
 
         if not res or not res.user:
@@ -240,4 +258,8 @@ def logout():
             except Exception:
                 pass
         st.session_state.user = None
+        if "mfa_pending_user" in st.session_state:
+            del st.session_state["mfa_pending_user"]
+        if "mfa_factor_id" in st.session_state:
+            del st.session_state["mfa_factor_id"]
         st.rerun()
