@@ -45,7 +45,7 @@ if user is None:
             qr_url = pending.get("qr_code_url")
             if qr_url:
                 st.image(qr_url, caption="Scansiona con la tua app 2FA", width=220)
-            
+
             totp_secret = pending.get("totp_secret", "")
             if totp_secret:
                 st.markdown(f"**Oppure inserisci la chiave segreta a mano:**")

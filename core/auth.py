@@ -67,12 +67,12 @@ def generate_totp_details_for_user(username, email=""):
     # 16-character Base32 secret key for authenticator apps
     base32_chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567"
     totp_secret = "".join(base32_chars[b % 32] for b in raw_hash[:16])
-    
+
     label = f"EcomApp:{username or email}"
     issuer = "EcomApp"
     otpauth_url = f"otpauth://totp/{label}?secret={totp_secret}&issuer={issuer}"
     qr_code_url = f"https://api.qrserver.com/v1/create-qr-code/?size=220x220&data={otpauth_url}"
-    
+
     return {
         "totp_secret": totp_secret,
         "qr_code_url": qr_code_url,
