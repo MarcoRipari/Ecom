@@ -20,3 +20,7 @@ gspread-formatting
 pydrive2
 dropbox
 reportlab
+chardet
+openai
+faiss-cpu
+sentence-transformers

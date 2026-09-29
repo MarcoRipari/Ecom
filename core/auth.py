@@ -5,6 +5,7 @@ import hmac
 import struct
 import time
 import base64
+from core.app_db import ensure_dipendente_exists
 
 supabase = None
 supabase_admin = None
@@ -121,6 +122,13 @@ def verify_totp_secret_code(secret_b32: str, code: str, window: int = 1) -> bool
 
     return False
 
+def _ensure_user_employee_record(user_data):
+    full_name = f"{(user_data.get('nome') or '').strip()} {(user_data.get('cognome') or '').strip()}".strip()
+    if not full_name:
+        full_name = user_data.get("username", "")
+    if full_name:
+        ensure_dipendente_exists(full_name)
+
 def login(identificativo: str, password: str, require_mfa: bool = True) -> bool:
     identificativo = (identificativo or "").strip()
     password = password or ""
@@ -151,6 +159,8 @@ def login(identificativo: str, password: str, require_mfa: bool = True) -> bool:
         else:
             st.error("❌ Credenziali errate.")
             return False
+
+        _ensure_user_employee_record(user_data)
 
         if require_mfa:
             totp_info = generate_totp_details_for_user(user_data["username"], user_data["email"])
@@ -197,6 +207,8 @@ def login(identificativo: str, password: str, require_mfa: bool = True) -> bool:
             "role": profilo.get("role", "guest"),
         }
 
+        _ensure_user_employee_record(user_data)
+
         # Check Supabase Auth MFA enrollment or generate TOTP details
         mfa_required = require_mfa or profilo.get("mfa_enabled", False)
         if mfa_required:
@@ -241,6 +253,7 @@ def verify_2fa_code(otp_code: str) -> bool:
                 if verify:
                     st.session_state.user = pending_user
                     st.session_state.user["mfa_verified"] = True
+                    _ensure_user_employee_record(pending_user)
                     if "mfa_pending_user" in st.session_state:
                         del st.session_state["mfa_pending_user"]
                     return True
@@ -252,6 +265,7 @@ def verify_2fa_code(otp_code: str) -> bool:
     if totp_secret and verify_totp_secret_code(totp_secret, otp_code):
         st.session_state.user = pending_user
         st.session_state.user["mfa_verified"] = True
+        _ensure_user_employee_record(pending_user)
         if "mfa_pending_user" in st.session_state:
             del st.session_state["mfa_pending_user"]
         return True
@@ -304,6 +318,10 @@ def register_user(email: str, password: str, **param) -> bool:
         }
 
         admin.table("profiles").insert(profile).execute()
+
+        full_name = f"{(param.get('nome') or '').strip()} {(param.get('cognome') or '').strip()}".strip() or param.get("username", "")
+        ensure_dipendente_exists(full_name)
+
         st.success(f"✅ Utente {param.get('username', email)} creato correttamente.")
         return True
 

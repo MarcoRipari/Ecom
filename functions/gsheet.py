@@ -1,4 +1,5 @@
 import streamlit as st
+import os
 from google.oauth2 import service_account
 import gspread
 from gspread_formatting import CellFormat, NumberFormat, format_cell_ranges
@@ -12,28 +13,51 @@ from pydrive2.auth import GoogleAuth
 from pydrive2.drive import GoogleDrive
 
 # ---------------------------
-# 📊 Google Sheets
+# 📊 Google Sheets Client Helper
 # ---------------------------
-credentials = service_account.Credentials.from_service_account_info(
-    st.secrets["GCP_SERVICE_ACCOUNT"],
-    scopes=[
-        "https://www.googleapis.com/auth/spreadsheets",
-        "https://www.googleapis.com/auth/drive"
-    ]
-)
-gsheet_client = gspread.authorize(credentials)
-drive_service = build('drive', 'v3', credentials=credentials)
+_credentials = None
+gsheet_client = None
+drive_service = None
+
+def get_gsheet_client():
+    global _credentials, gsheet_client, drive_service
+    if gsheet_client is not None:
+        return gsheet_client, drive_service
+
+    gcp_sa = None
+    try:
+        gcp_sa = st.secrets.get("GCP_SERVICE_ACCOUNT")
+    except Exception:
+        pass
+
+    if gcp_sa:
+        try:
+            _credentials = service_account.Credentials.from_service_account_info(
+                gcp_sa,
+                scopes=[
+                    "https://www.googleapis.com/auth/spreadsheets",
+                    "https://www.googleapis.com/auth/drive"
+                ]
+            )
+            gsheet_client = gspread.authorize(_credentials)
+            drive_service = build('drive', 'v3', credentials=_credentials)
+        except Exception:
+            gsheet_client = None
+            drive_service = None
+
+    return gsheet_client, drive_service
 
 def get_sheet(sheet_id, tab):
-    spreadsheet = gsheet_client.open_by_key(sheet_id)
+    client, _ = get_gsheet_client()
+    if not client:
+        raise ValueError("Google Sheets credentials non configurate nei secrets.")
+    spreadsheet = client.open_by_key(sheet_id)
     worksheets = spreadsheet.worksheets()
 
-    # Confronto case-insensitive per maggiore robustezza
     for ws in worksheets:
         if ws.title.strip().lower() == tab.strip().lower():
             return ws
 
-    # Se non trovato, lo crea
     return spreadsheet.add_worksheet(title=tab, rows="10000", cols="50")
 
 def append_to_sheet(sheet_id, tab, df):
@@ -42,16 +66,12 @@ def append_to_sheet(sheet_id, tab, df):
     values = df.values.tolist()
 
     existing_rows = len(sheet.get_all_values())
-
-    # Definiamo la cella di partenza
     start_row = existing_rows + 1 if existing_rows > 0 else 1
-    target_cell = f"A{start_row}"  # Diventa "A1", "A11", "A101", ecc.
+    target_cell = f"A{start_row}"
     sheet.update(target_cell, values, value_input_option="RAW")
-    #sheet.append_rows(values, value_input_option="RAW")  # ✅ chiamata unica
 
 def append_log(sheet_id, logs):
     sheet = get_sheet(sheet_id, "logs")
-    #sheet.append_row(list(log_data.values()), value_input_option="RAW")
     rows_to_append = []
     for log in logs:
         rows_to_append.append([

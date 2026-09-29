@@ -33,8 +33,13 @@ Alcune parole devono seguire regole fisse:
 - "sneakers" -> {"en": "sneakers", "fr": "sneakers", "es": "sneakers"}
 """
 
-# Client OpenAI async
-client = AsyncOpenAI(api_key=st.secrets["OPENAI_API_KEY"])
+def get_async_openai_client():
+    api_key = None
+    try:
+        api_key = st.secrets.get("OPENAI_API_KEY") or os.environ.get("OPENAI_API_KEY")
+    except Exception:
+        api_key = os.environ.get("OPENAI_API_KEY")
+    return AsyncOpenAI(api_key=api_key or "dummy_key")
 
 def normalize(text: str) -> str:
     return text.strip().lower()
@@ -95,7 +100,6 @@ def load_vocab(sheet_id, tab):
     if df.empty:
         return vocab, ws
 
-    # Usiamo enumerate o row index per tracciare la posizione esatta sul foglio
     for idx, row in df.iterrows():
         it = str(row["it"]).strip()
         vocab[it] = {
@@ -104,7 +108,7 @@ def load_vocab(sheet_id, tab):
                 for lang in row.index
                 if lang != "it" and pd.notna(row.get(lang))
             },
-            "row_number": idx + 2  # Salvia mo il numero di riga esatto su Google Sheets
+            "row_number": idx + 2
         }
 
     return vocab, ws
@@ -118,6 +122,7 @@ def vocab_to_df(vocab):
     return pd.DataFrame(rows)
 
 async def translate_term(term, target_langs, col_name):
+    client = get_async_openai_client()
     important_note = ""
     if col_name and "colore" in col_name.lower():
         important_note = (
@@ -146,7 +151,6 @@ async def translate_term(term, target_langs, col_name):
         """}
     ]
 
-    # Generazione dinamica dei parametri dello schema JSON in base alle sole lingue mancanti
     functions = [
         {
             "name": "translate_text",
@@ -191,15 +195,12 @@ async def enrich_vocab_with_ui(
 
     start_time = time.time()
 
-    # Buffer per la gestione a blocchi (batch)
-    buffer_updates = {}       # { row_number: [valori_riga] } per righe esistenti
-    buffer_new_rows = []      # [ [valori_riga], ... ] per nuovi record
-    processed_in_batch = 0    # Contatore per far scattare il salvataggio ogni 25 elementi
+    buffer_updates = {}
+    buffer_new_rows = []
+    processed_in_batch = 0
 
-    # SEMAFORO: Limita a 15 le chiamate OpenAI concorrenti simultanee (evita errori di rate limit)
     sem = asyncio.Semaphore(15)
 
-    # WORKER ASINCRONO: Gestisce la singola chiamata OpenAI in parallelo
     async def worker(term_key, term_info):
         async with sem:
             t_col_name = term_info["col_name"]
@@ -210,17 +211,14 @@ async def enrich_vocab_with_ui(
             except Exception as e:
                 return term_key, term_info, e
 
-    # Lanciamo tutte le traduzioni simultaneamente (Concorrenza di massa)
     tasks = [worker(term, info) for term, info in missing_terms.items()]
 
-    # Consumiamo i task non appena vengono completati (in ordine di arrivo)
     for i, future in enumerate(asyncio.as_completed(tasks), start=1):
         term, info, result = await future
         key = term.strip()
         col_name = info["col_name"]
         langs_to_translate = info["langs"]
 
-        # Calcolo tempi ed aggiornamento UI dinamico
         elapsed = time.time() - start_time
         avg_time = elapsed / i
         remaining = avg_time * (total - i)
@@ -229,21 +227,18 @@ async def enrich_vocab_with_ui(
         status_text.text(f"🔤 Traduzione: {term} ({i}/{total})")
         timer_text.text(f"⏱️ Trascorso: {format_time(elapsed)} | Stimato: {format_time(remaining)}")
 
-        # Inizializzazione della struttura in memoria se il termine è nuovo
         if key not in vocab:
             vocab[key] = {
                 "translations": {lang: "" for lang in target_langs},
                 "row_number": None
             }
 
-        # Gestione del risultato o dell'eventuale errore del worker
         if isinstance(result, Exception):
             st.warning(f"Errore traduzione '{term}': {result}")
         else:
             for lang in langs_to_translate:
                 vocab[key]["translations"][lang] = result.get(lang, "")
 
-        # Prepariamo l'array dei dati per la riga del foglio Google Sheets
         t = vocab[key]["translations"]
         row_data = [
             key,
@@ -254,7 +249,6 @@ async def enrich_vocab_with_ui(
             col_name if vocab[key]["row_number"] is None else col_name + " (aggiornato)"
         ]
 
-        # Assegnazione al rispettivo buffer di blocco
         if vocab[key]["row_number"] is not None:
             buffer_updates[vocab[key]["row_number"]] = row_data
         else:
@@ -262,9 +256,6 @@ async def enrich_vocab_with_ui(
 
         processed_in_batch += 1
 
-        # ========================================================
-        # SALVATAGGIO A BLOCCHI (ANTI-CRASH) - OGNI 25 ELEMENTI
-        # ========================================================
         if processed_in_batch >= SAVE_TRANSLATE_EVERY:
             status_text.text("💾 Salvataggio blocco su Google Sheets...")
 
@@ -289,9 +280,6 @@ async def enrich_vocab_with_ui(
             saved_badge.markdown(f"💾 **Salvataggi intermedi completati alla riga {i}/{total}**")
             processed_in_batch = 0
 
-    # ========================================================
-    # SALVATAGGIO FINALE PER I RESIDUI RIMASTI FUORI DAL BLOCCO
-    # ========================================================
     if buffer_updates or buffer_new_rows:
         status_text.text("💾 Salvataggio ultimi record rimasti...")
 
@@ -315,8 +303,6 @@ async def enrich_vocab_with_ui(
     status_text.text("✅ Google Sheets aggiornato.")
 
 def extract_missing_terms(df, cols_to_translate, target_langs, vocab):
-    # 🌟 FIX DI SICUREZZA: Se vocab è una lista (es. righe grezze del foglio),
-    # significa che non è stato convertito in dizionario mappato.
     if isinstance(vocab, list):
         st.warning("⚠️ Rilevato formato vocab non corretto. Inizializzazione dizionario di emergenza.")
         vocab_dict = {}
@@ -324,7 +310,7 @@ def extract_missing_terms(df, cols_to_translate, target_langs, vocab):
             if not riga or len(riga) < 1:
                 continue
             it_val = riga[0].strip()
-            if it_val and it_val != "it": # Salta l'intestazione
+            if it_val and it_val != "it":
                 vocab_dict[it_val] = {
                     "translations": {
                         "en": riga[1] if len(riga) > 1 else "",
@@ -332,16 +318,14 @@ def extract_missing_terms(df, cols_to_translate, target_langs, vocab):
                         "de": riga[3] if len(riga) > 3 else "",
                         "es": riga[4] if len(riga) > 4 else ""
                     },
-                    "row_number": idx # Recuperiamo l'esatta riga per il batch_update futuro
+                    "row_number": idx
                 }
         vocab = vocab_dict
 
     missing = {}
 
-    # 🌟 CORRETTO: Cambiato 'columns' con 'cols_to_translate' coerentemente con gli argomenti della funzione
     for col in cols_to_translate:
         if col in df.columns:
-            # Estraiamo il nome pulito senza la dicitura " (it)"
             base_col_name = col.replace(" (it)", "").strip()
 
             for idx, row in df.iterrows():
@@ -352,7 +336,6 @@ def extract_missing_terms(df, cols_to_translate, target_langs, vocab):
                 if key == "" or key in MANUAL_TRANSLATIONS:
                     continue
 
-                # Se il termine non è presente nel vocabolario, lo inizializziamo
                 if key not in vocab:
                     vocab[key] = {
                         "translations": {lang: "" for lang in target_langs},
@@ -365,30 +348,21 @@ def extract_missing_terms(df, cols_to_translate, target_langs, vocab):
                     csv_lang_col = f"{base_col_name} ({lang})"
                     csv_translation = ""
 
-                    # 1. Controlliamo se la colonna della lingua esiste ed è popolata nel CSV
                     if csv_lang_col in df.columns and pd.notna(row[csv_lang_col]):
                         csv_translation = str(row[csv_lang_col]).strip()
 
-                    # 2. Se c'è una traduzione nel CSV, la importiamo in memoria e saltiamo l'AI
                     if csv_translation != "":
                         vocab[key]["translations"][lang] = csv_translation
-                        # 🔧 FIX: se questo termine era già stato marcato come "mancante"
-                        # per questa lingua da una riga precedente (stesso testo IT duplicato
-                        # su più righe, con colonne compilate in modo non uniforme), lo
-                        # rimuoviamo dalla coda AI: ora abbiamo la traduzione dal CSV.
                         if key in missing and lang in missing[key]["langs"]:
                             missing[key]["langs"].remove(lang)
                             if not missing[key]["langs"]:
                                 del missing[key]
                         continue
 
-                    # 3. Se la colonna non esiste nel CSV o la cella è vuota, guardiamo Google Sheets
                     saved_langs = vocab[key]["translations"]
                     if lang not in saved_langs or pd.isna(saved_langs[lang]) or str(saved_langs[lang]).strip() == "":
-                        # Manca ovunque: segnamo come da tradurre con AI
                         langs_to_translate.append(lang)
 
-                # Se ci sono lingue scoperte per questa stringa, la passiamo alla coda dei mancanti
                 if langs_to_translate:
                     if key in missing:
                         missing[key]["langs"] = list(set(missing[key]["langs"] + langs_to_translate))
@@ -409,55 +383,6 @@ def get_lang(col):
     m = LANG_RE.search(col)
     return m.group(1).lower() if m else None
 
-#def apply_translations(df, columns, langs, vocab):
-#    dfs_by_lang = {}
-#    selected_bases = {get_base_name(c) for c in columns}
-#
-#    rows_to_drop = set()
-#    col_list = list(df.columns)
-#    for idx, col in enumerate(col_list):
-#        base = get_base_name(col)
-#        lang = get_lang(col)
-#
-#        if base in selected_bases and lang == "it":
-#            if idx + 1 < len(col_list):
-#                next_col = col_list[idx + 1]
-#                next_lang = get_lang(next_col)
-#                if next_lang != "it":
-#                    populated_rows = df[next_col].notna() & (df[next_col].astype(str).str.strip() != "")
-#                    rows_to_drop.update(df.index[populated_rows])
-#
-#    for lang in langs:
-#        df_lang = df.copy()
-#        if rows_to_drop:
-#            df_lang.drop(index=list(rows_to_drop), inplace=True)
-#
-#        for col in df_lang.columns:
-#            col_lang = get_lang(col)
-#            base = get_base_name(col)
-#
-#            if not col_lang or col_lang == "it":
-#                continue
-#
-#            if base in selected_bases:
-#                it_col = col.replace(f"({col_lang})", "(it)")
-#                if it_col in df_lang.columns:
-#                    def translate_cell(val):
-#                        if pd.isna(val):
-#                            return ""
-#                        key = str(val).strip()
-#                        return vocab.get(key, {}).get(lang, key)
-#                    df_lang[col] = df_lang[it_col].apply(translate_cell)
-#                else:
-#                    df_lang[col] = df_lang[col].fillna("")
-#
-#            new_col = re.sub(LANG_RE, f"({lang})", col)
-#            df_lang.rename(columns={col: new_col}, inplace=True)
-#
-#        dfs_by_lang[lang] = df_lang
-#
-#    return dfs_by_lang
-
 def apply_translations(df, columns, langs, vocab):
     dfs_by_lang = {}
     selected_bases = {get_base_name(c) for c in columns}
@@ -465,24 +390,12 @@ def apply_translations(df, columns, langs, vocab):
     for lang in langs:
         df_lang = df.copy()
 
-        # 1. Identifichiamo tutte le colonne delle ALTRE lingue estere nate dal merge dei 4 file
-        # Se stiamo creando il file per 'de', vogliamo eliminare 'en', 'fr', 'es' per non sporcare l'output
         other_langs_cols = [
             col for col in df_lang.columns
             if any(col.endswith(f"({l})") for l in AVAILABLE_LANGS if l != lang)
         ]
         df_lang.drop(columns=other_langs_cols, errors='ignore', inplace=True)
 
-        # 2. Rigeneriamo/completiamo la colonna della lingua partendo dall'italiano.
-        # 🔧 FIX: NON cancelliamo più a priori la colonna "(lang)" originale del file
-        # caricato. Testi IT identici su più righe (es. stessa "Descrizione" riusata
-        # su varianti/colori diversi) possono avere traduzioni leggermente diverse
-        # riga per riga: usare solo il vocabolario (indicizzato per testo IT) faceva
-        # sì che l'ultima riga processata sovrascrivesse la traduzione di tutte le
-        # altre righe con lo stesso testo IT, "rubando" la traduzione corretta di
-        # una riga e assegnandola a un'altra. Ora la traduzione già presente nella
-        # riga stessa ha SEMPRE priorità; il vocabolario è solo un fallback per le
-        # righe che non hanno quella colonna lingua compilata nel file caricato.
         cols_to_drop = []
         for col in df.columns:
             base = get_base_name(col)
@@ -490,18 +403,15 @@ def apply_translations(df, columns, langs, vocab):
 
             if base in selected_bases and col_lang == "it":
                 new_col_name = f"{base} ({lang})"
-                # Colonna con la traduzione già presente in questa riga del file caricato (se c'è)
                 original_col = f"{base} ({lang})"
                 original_series = df[original_col] if original_col in df.columns else None
 
                 def translate_cell(val, idx):
-                    # 1. Priorità assoluta: la traduzione già presente in QUESTA riga
                     if original_series is not None:
                         orig_val = original_series.loc[idx]
                         if pd.notna(orig_val) and str(orig_val).strip() != "":
                             return str(orig_val).strip()
 
-                    # 2. Fallback: vocabolario (righe senza traduzione propria nel file)
                     if pd.isna(val):
                         return ""
                     key = str(val).strip()
@@ -515,17 +425,11 @@ def apply_translations(df, columns, langs, vocab):
                 ]
                 cols_to_drop.append(col)
 
-        # Elimina le colonne (it) se l'output finale deve contenere solo la lingua target,
-        # oppure commenta questa riga se vuoi mantenere sia (it) che (lingua_target) nel file finale
         df_lang.drop(columns=cols_to_drop, errors='ignore', inplace=True)
 
         dfs_by_lang[lang] = df_lang
 
     return dfs_by_lang
-
-# =========================================================
-# Google Translator logic (originally from descrizioni)
-# =========================================================
 
 def find_translation(db, text_it, target_lang):
     text_it = str(text_it).strip().lower()
@@ -642,15 +546,10 @@ def upload_translation_db_to_github(db, original_db_json):
         pass
 
 def update_gspread_cell(ws, term, lang, translation):
-    """
-    Cerca la riga del termine italiano e aggiorna la colonna della lingua specifica.
-    """
     try:
-        # Trova la cella del termine italiano
         cell = ws.find(term)
         if cell:
             row = cell.row
-            # Mappa delle colonne (IT=1, EN=2, FR=3, DE=4, ES=5 basato su vocab_to_rows)
             col_mapping = {"en": 2, "fr": 3, "de": 4, "es": 5}
             col = col_mapping.get(lang.lower())
 
