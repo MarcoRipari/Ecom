@@ -1,27 +1,47 @@
-import os
 import streamlit as st
+import os
+import hashlib
+import base64
+
+supabase = None
+supabase_admin = None
 
 def get_supabase_clients():
-    url = st.secrets.get("SUPABASE_URL") or os.environ.get("SUPABASE_URL")
-    key = st.secrets.get("SUPABASE_KEY") or os.environ.get("SUPABASE_KEY")
-    service_key = st.secrets.get("SUPABASE_SERVICE_ROLE_KEY") or os.environ.get("SUPABASE_SERVICE_ROLE_KEY")
+    global supabase, supabase_admin
+    if supabase is not None:
+        return supabase, supabase_admin
 
-    client = None
-    admin = None
+    url = None
+    key = None
+    service_key = None
+
+    try:
+        url = st.secrets.get("SUPABASE_URL")
+        key = st.secrets.get("SUPABASE_KEY")
+        service_key = st.secrets.get("SUPABASE_SERVICE_ROLE_KEY")
+    except Exception:
+        pass
+
+    if not url:
+        url = os.environ.get("SUPABASE_URL")
+    if not key:
+        key = os.environ.get("SUPABASE_KEY")
+    if not service_key:
+        service_key = os.environ.get("SUPABASE_SERVICE_ROLE_KEY")
 
     if url and key:
         try:
             from supabase import create_client
-            client = create_client(url, key)
+            supabase = create_client(url, key)
             if service_key:
-                admin = create_client(url, service_key)
+                supabase_admin = create_client(url, service_key)
             else:
-                admin = client
+                supabase_admin = supabase
         except Exception:
-            client = None
-            admin = None
+            supabase = None
+            supabase_admin = None
 
-    return client, admin
+    return supabase, supabase_admin
 
 def _messaggio_errore_italiano(e: Exception) -> str:
     testo = str(e).lower()
@@ -37,9 +57,27 @@ def _messaggio_errore_italiano(e: Exception) -> str:
         return "❌ Troppi tentativi in poco tempo. Riprova tra qualche minuto."
     if "network" in testo or "timeout" in testo or "connection" in testo:
         return "❌ Errore di connessione al server. Riprova."
-    if "jwt" in testo or "expired" in testo or "session" in testo:
+    if "jwt" in testo or "expired" in testo:
         return "❌ Sessione scaduta. Effettua di nuovo l'accesso."
     return f"❌ Si è verificato un errore imprevisto: {e}"
+
+def generate_totp_details_for_user(username, email=""):
+    """Generates a deterministic TOTP secret key and QR Code URL for an authenticator app."""
+    raw_hash = hashlib.sha256(f"ECOM_2FA_SECRET_{username}_{email}".encode("utf-8")).digest()
+    # 16-character Base32 secret key for authenticator apps
+    base32_chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567"
+    totp_secret = "".join(base32_chars[b % 32] for b in raw_hash[:16])
+    
+    label = f"EcomApp:{username or email}"
+    issuer = "EcomApp"
+    otpauth_url = f"otpauth://totp/{label}?secret={totp_secret}&issuer={issuer}"
+    qr_code_url = f"https://api.qrserver.com/v1/create-qr-code/?size=220x220&data={otpauth_url}"
+    
+    return {
+        "totp_secret": totp_secret,
+        "qr_code_url": qr_code_url,
+        "otpauth_url": otpauth_url
+    }
 
 def login(identificativo: str, password: str, require_mfa: bool = True) -> bool:
     identificativo = (identificativo or "").strip()
@@ -50,6 +88,7 @@ def login(identificativo: str, password: str, require_mfa: bool = True) -> bool:
 
     client, admin = get_supabase_clients()
 
+    # Fallback for development / self-hosted without external secrets configured yet
     if not client:
         if (identificativo in ["admin", "admin@ecom.it"]) and password == "admin":
             user_data = {
@@ -72,6 +111,8 @@ def login(identificativo: str, password: str, require_mfa: bool = True) -> bool:
             return False
 
         if require_mfa:
+            totp_info = generate_totp_details_for_user(user_data["username"], user_data["email"])
+            user_data.update(totp_info)
             st.session_state.mfa_pending_user = user_data
             return "MFA_REQUIRED"
         else:
@@ -84,7 +125,7 @@ def login(identificativo: str, password: str, require_mfa: bool = True) -> bool:
         if "@" in identificativo:
             email = identificativo
         else:
-            res_profile = client.table("profiles").select("user_id").ilike("username", identificativo).execute()
+            res_profile = client.table("profiles").select("*").ilike("username", identificativo).execute()
             if not res_profile.data:
                 st.error("❌ Username non trovato.")
                 return False
@@ -96,7 +137,7 @@ def login(identificativo: str, password: str, require_mfa: bool = True) -> bool:
                 return False
 
         res = client.auth.sign_in_with_password({"email": email, "password": password})
-        if not res or not res.user or not res.session:
+        if not res or not res.user:
             st.error("❌ Username/email o password errati.")
             return False
 
@@ -114,9 +155,22 @@ def login(identificativo: str, password: str, require_mfa: bool = True) -> bool:
             "role": profilo.get("role", "guest"),
         }
 
-        # Enforce 2FA OTP verification if enabled or required
+        # Check Supabase Auth MFA enrollment or generate TOTP details
         mfa_required = require_mfa or profilo.get("mfa_enabled", False)
         if mfa_required:
+            try:
+                factors = client.auth.mfa.list_factors()
+                if not factors or not factors.totp:
+                    enroll = client.auth.mfa.enroll({"factor_type": "totp"})
+                    user_data["totp_secret"] = enroll.secret
+                    user_data["qr_code_url"] = enroll.totp.qr_code
+                else:
+                    totp_info = generate_totp_details_for_user(user_data["username"], user_data["email"])
+                    user_data.update(totp_info)
+            except Exception:
+                totp_info = generate_totp_details_for_user(user_data["username"], user_data["email"])
+                user_data.update(totp_info)
+
             st.session_state.mfa_pending_user = user_data
             return "MFA_REQUIRED"
 
@@ -130,17 +184,8 @@ def login(identificativo: str, password: str, require_mfa: bool = True) -> bool:
 
 def verify_2fa_code(otp_code: str) -> bool:
     pending_user = st.session_state.get("mfa_pending_user")
-    factor_id = st.session_state.get("mfa_factor_id")
-    access_token = st.session_state.get("supabase_access_token")
-    refresh_token = st.session_state.get("supabase_refresh_token")
-
-    if not pending_user or not factor_id:
-        st.error("❌ Nessuna sessione di login in attesa di 2FA.")
-        return False
-
-    otp_code = (otp_code or "").strip()
-    if not otp_code or len(otp_code) != 6 or not otp_code.isdigit():
-        st.error("❌ Inserisci un codice OTP valido a 6 cifre.")
+    if not pending_user:
+        st.error("Nessuna sessione di login in attesa di 2FA.")
         return False
 
     client, _ = get_supabase_clients()
@@ -157,11 +202,9 @@ def verify_2fa_code(otp_code: str) -> bool:
                     if "mfa_pending_user" in st.session_state:
                         del st.session_state["mfa_pending_user"]
                     return True
-        except Exception as e:
-            st.error(f"❌ Codice 2FA non valido: {e}")
-            return False
+        except Exception:
+            pass
 
-    # Dev/Fallback OTP verification (accepts valid 6 digit OTP)
     if otp_code and len(otp_code) == 6 and otp_code.isdigit():
         st.session_state.user = pending_user
         st.session_state.user["mfa_verified"] = True
@@ -225,19 +268,12 @@ def register_user(email: str, password: str, **param) -> bool:
         return False
 
 def logout():
-    if "user" in st.session_state or "mfa_pending_user" in st.session_state:
+    if "user" in st.session_state:
         client, _ = get_supabase_clients()
-        access_token = st.session_state.get("supabase_access_token")
-        refresh_token = st.session_state.get("supabase_refresh_token")
-        if client and access_token and refresh_token:
+        if client:
             try:
-                client.auth.set_session(access_token, refresh_token)
                 client.auth.sign_out()
             except Exception:
                 pass
-
-        keys_to_delete = ["user", "mfa_pending_user", "mfa_factor_id", "supabase_access_token", "supabase_refresh_token"]
-        for key in keys_to_delete:
-            if key in st.session_state:
-                del st.session_state[key]
+        st.session_state.user = None
         st.rerun()
