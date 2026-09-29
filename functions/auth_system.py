@@ -1,16 +1,34 @@
+import os
 import streamlit as st
 from supabase import create_client, Client
 
-supabase_url = st.secrets["SUPABASE_URL"]
-supabase_key = st.secrets["SUPABASE_KEY"]
-service_role_key = st.secrets["SUPABASE_SERVICE_ROLE_KEY"]
-supabase: Client = create_client(supabase_url, supabase_key)
-supabase_admin: Client = create_client(supabase_url, service_role_key)
+supabase: Client = None
+supabase_admin: Client = None
+
+def get_supabase_clients():
+    global supabase, supabase_admin
+    if supabase is not None:
+        return supabase, supabase_admin
+
+    url = st.secrets.get("SUPABASE_URL") or os.environ.get("SUPABASE_URL")
+    key = st.secrets.get("SUPABASE_KEY") or os.environ.get("SUPABASE_KEY")
+    service_key = st.secrets.get("SUPABASE_SERVICE_ROLE_KEY") or os.environ.get("SUPABASE_SERVICE_ROLE_KEY")
+
+    if url and key:
+        try:
+            supabase = create_client(url, key)
+            if service_key:
+                supabase_admin = create_client(url, service_key)
+            else:
+                supabase_admin = supabase
+        except Exception:
+            supabase = None
+            supabase_admin = None
+
+    return supabase, supabase_admin
 
 def _messaggio_errore_italiano(e: Exception) -> str:
-    """Traduce le eccezioni più comuni di Supabase in messaggi leggibili in
-    italiano, invece di mostrare il testo grezzo (spesso in inglese e poco
-    chiaro per l'utente finale)."""
+    """Traduce le eccezioni più comuni di Supabase in messaggi leggibili in italiano."""
     testo = str(e).lower()
     if "invalid login credentials" in testo or "invalid_credentials" in testo:
         return "❌ Username/email o password errati."
@@ -28,11 +46,14 @@ def _messaggio_errore_italiano(e: Exception) -> str:
         return "❌ Sessione scaduta. Effettua di nuovo l'accesso."
     return f"❌ Si è verificato un errore imprevisto: {e}"
 
-def login(identificativo: str, password: str) -> bool:
-    """Effettua il login con username OPPURE email (rilevato automaticamente
-    dalla presenza di '@'). Supabase Auth richiede sempre l'email per
-    autenticarsi: se l'utente inserisce lo username, prima risaliamo
-    all'email associata leggendo la tabella 'profiles'."""
+def login(identificativo: str, password: str) -> str | bool:
+    """Effettua il login con username OPPURE email. Se l'utente ha la 2FA attiva,
+    restituisce 'MFA_REQUIRED' e salva le informazioni in session_state per il secondo fattore."""
+    client, admin = get_supabase_clients()
+    if not client:
+        st.error("❌ Connessione al database non disponibile.")
+        return False
+
     try:
         identificativo = (identificativo or "").strip()
         password = password or ""
@@ -43,16 +64,8 @@ def login(identificativo: str, password: str) -> bool:
         if "@" in identificativo:
             email = identificativo
         else:
-            # 🔧 FIX: prima si cercava SEMPRE per username, quindi inserire
-            # un'email qui falliva sempre con "Username non trovato". Ora
-            # rileviamo il formato e usiamo l'email direttamente se presente.
             try:
-                # 🔧 FIX: .eq() confronta lo username in modo case-sensitive
-                # (Postgres di default), quindi "MarcoRipari" e "marcoripari"
-                # risultavano utenti diversi. .ilike() confronta senza distinguere
-                # maiuscole/minuscole; non essendoci wildcard (%, _) in uno
-                # username normale, si comporta come un confronto esatto case-insensitive.
-                res_profile = supabase.table("profiles").select("*").ilike("username", identificativo).execute()
+                res_profile = client.table("profiles").select("*").ilike("username", identificativo).execute()
             except Exception as e:
                 st.error(_messaggio_errore_italiano(e))
                 return False
@@ -63,7 +76,7 @@ def login(identificativo: str, password: str) -> bool:
 
             user_id = res_profile.data[0]["user_id"]
             try:
-                res_user = supabase_admin.auth.admin.get_user_by_id(user_id)
+                res_user = admin.auth.admin.get_user_by_id(user_id) if admin else None
                 email = res_user.user.email if res_user and res_user.user else None
             except Exception as e:
                 st.error(_messaggio_errore_italiano(e))
@@ -73,9 +86,8 @@ def login(identificativo: str, password: str) -> bool:
                 st.error("❌ Nessuna email associata a questo username.")
                 return False
 
-        # Login vero e proprio (richiede sempre email, anche se l'utente ha digitato lo username)
         try:
-            res = supabase.auth.sign_in_with_password({"email": email, "password": password})
+            res = client.auth.sign_in_with_password({"email": email, "password": password})
         except Exception as e:
             st.error(_messaggio_errore_italiano(e))
             return False
@@ -84,10 +96,8 @@ def login(identificativo: str, password: str) -> bool:
             st.error("❌ Username/email o password errati.")
             return False
 
-        # Recupero profilo (nome, cognome, ruolo) tramite user_id: funziona sia
-        # per chi ha fatto login con username sia con email
         try:
-            res_profile2 = supabase.table("profiles").select("*").eq("user_id", res.user.id).execute()
+            res_profile2 = client.table("profiles").select("*").eq("user_id", res.user.id).execute()
         except Exception as e:
             st.error(_messaggio_errore_italiano(e))
             return False
@@ -97,68 +107,101 @@ def login(identificativo: str, password: str) -> bool:
             return False
 
         profilo = res_profile2.data[0]
-        st.session_state.user = {
+        user_data = {
+            "id": res.user.id,
             "email": email,
             "username": profilo.get("username", ""),
             "nome": profilo.get("nome", ""),
             "cognome": profilo.get("cognome", ""),
             "role": profilo.get("role", "guest"),
         }
+
+        # Controllo dei fattori 2FA registrati su Supabase Auth
+        factors_res = client.auth.mfa.list_factors()
+        verified_factors = [f for f in getattr(factors_res, 'totp', []) if getattr(f, 'status', '') == 'verified']
+
+        if verified_factors:
+            st.session_state.mfa_pending_user = user_data
+            st.session_state.mfa_factor_id = verified_factors[0].id
+            return "MFA_REQUIRED"
+
+        st.session_state.user = user_data
+        st.session_state.user["mfa_verified"] = True
         return True
 
     except Exception as e:
         st.error(_messaggio_errore_italiano(e))
         return False
 
+def verify_2fa_code(otp_code: str) -> bool:
+    """Valida il codice OTP a 6 cifre con Supabase MFA."""
+    pending_user = st.session_state.get("mfa_pending_user")
+    factor_id = st.session_state.get("mfa_factor_id")
 
-
-def login_password(email: str, password: str) -> bool:
-    try:
-        res = supabase.auth.sign_in_with_password({
-            "email": email,
-            "password": password
-        })
-        if res.user is not None:
-
-            # Recupera il profilo dell'utente usando user_id
-            profile = supabase.table("profiles").select("*").eq("user_id", res.user.id).single().execute()
-
-            if profile.data is None:
-                st.error("❌ Profilo utente non trovato")
-                return False
-
-            # Salva tutto in session_state
-            st.session_state.user = {
-                "data": res.user,
-                "email": res.user.email,
-                "nome": profile.data["nome"],
-                "cognome": profile.data["cognome"],
-                "username": profile.data["username"],
-                "role": profile.data["role"]
-            }
-            #st.session_state.user = res.user
-            #st.session_state.username = profile.data.get("username", res.user.email)
-            return True
-        else:
-            st.error("❌ Email o password errati")
-            return False
-    except Exception as e:
-        st.error(f"Errore login: {e}")
+    if not pending_user or not factor_id:
+        st.error("❌ Nessuna sessione di login in attesa di 2FA.")
         return False
 
+    otp_code = (otp_code or "").strip()
+    if not otp_code or len(otp_code) != 6 or not otp_code.isdigit():
+        st.error("❌ Inserisci un codice OTP valido a 6 cifre.")
+        return False
+
+    client, _ = get_supabase_clients()
+    if not client:
+        st.error("❌ Connessione al database non disponibile.")
+        return False
+
+    try:
+        challenge_res = client.auth.mfa.challenge({"factor_id": factor_id})
+        challenge_id = challenge_res.id
+
+        verify_res = client.auth.mfa.verify({
+            "factor_id": factor_id,
+            "challenge_id": challenge_id,
+            "code": otp_code
+        })
+
+        if verify_res and getattr(verify_res, "access_token", None):
+            st.session_state.user = pending_user
+            st.session_state.user["mfa_verified"] = True
+
+            if "mfa_pending_user" in st.session_state:
+                del st.session_state["mfa_pending_user"]
+            if "mfa_factor_id" in st.session_state:
+                del st.session_state["mfa_factor_id"]
+            return True
+        else:
+            st.error("❌ Codice 2FA errato o scaduto.")
+            return False
+
+    except Exception as e:
+        st.error(_messaggio_errore_italiano(e))
+        return False
 
 def logout():
-    if "user" in st.session_state:
-        try:
-            supabase.auth.sign_out()
-        except Exception as e:
-            # Anche se il logout lato Supabase fallisce (es. sessione già scaduta),
-            # puliamo comunque la sessione locale per non lasciare l'utente bloccato
-            st.warning(f"⚠️ Disconnessione dal server non riuscita ({e}), ma la sessione locale è stata comunque chiusa.")
+    """Effettua il logout pulendo sia la sessione Supabase sia la sessione Streamlit."""
+    client, _ = get_supabase_clients()
+    if "user" in st.session_state or "mfa_pending_user" in st.session_state:
+        if client:
+            try:
+                client.auth.sign_out()
+            except Exception as e:
+                st.warning(f"⚠️ Disconnessione dal server non riuscita ({e}), ma la sessione locale è stata comunque chiusa.")
         st.session_state.user = None
+        if "mfa_pending_user" in st.session_state:
+            del st.session_state["mfa_pending_user"]
+        if "mfa_factor_id" in st.session_state:
+            del st.session_state["mfa_factor_id"]
         st.rerun()
 
 def register_user(email: str, password: str, **param) -> bool:
+    """Registra un nuovo utente creando la credenziale in Auth ed inserendo il profilo in 'profiles'."""
+    client, admin = get_supabase_clients()
+    if not admin:
+        st.error("❌ Client Supabase Admin non configurato per la registrazione.")
+        return False
+
     try:
         email = (email or "").strip()
         password = password or ""
@@ -172,12 +215,8 @@ def register_user(email: str, password: str, **param) -> bool:
             st.error("❌ Lo username è obbligatorio.")
             return False
 
-        # 🆕 Controllo duplicati case-insensitive: dato che il login ora cerca
-        # lo username ignorando maiuscole/minuscole, due username che
-        # differiscono solo per case (es. "MarcoRipari" e "marcoripari")
-        # sarebbero ambigui in fase di accesso. Li blocchiamo qui.
         try:
-            esistente = supabase.table("profiles").select("username").ilike("username", param["username"]).execute()
+            esistente = client.table("profiles").select("username").ilike("username", param["username"]).execute()
             if esistente.data:
                 st.error(f"❌ Esiste già un utente con lo username '{param['username']}' (a meno di maiuscole/minuscole).")
                 return False
@@ -185,9 +224,8 @@ def register_user(email: str, password: str, **param) -> bool:
             st.error(_messaggio_errore_italiano(e))
             return False
 
-        # 1. Crea l'utente in Supabase Auth
         try:
-            res = supabase_admin.auth.admin.create_user({
+            res = admin.auth.admin.create_user({
                 "email": email,
                 "password": password,
                 "email_confirm": True
@@ -201,8 +239,6 @@ def register_user(email: str, password: str, **param) -> bool:
             return False
 
         user_id = res.user.id
-
-        # 2. Inserisci il profilo nella tabella profiles
         profile = {
             "user_id": user_id,
             "nome": param.get("nome", None),
@@ -212,10 +248,8 @@ def register_user(email: str, password: str, **param) -> bool:
         }
 
         try:
-            supabase_admin.table("profiles").insert(profile).execute()
+            admin.table("profiles").insert(profile).execute()
         except Exception as e:
-            # L'utente Auth è stato creato ma il profilo no: lo segnaliamo chiaramente
-            # invece di lasciare un utente "fantasma" senza spiegazioni
             st.error(
                 f"⚠️ Utente creato in autenticazione, ma il salvataggio del profilo è fallito: "
                 f"{_messaggio_errore_italiano(e)} Contatta un amministratore per completare la registrazione."
