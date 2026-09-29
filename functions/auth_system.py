@@ -2,17 +2,13 @@ import os
 import streamlit as st
 from supabase import create_client, Client
 
-supabase: Client = None
-supabase_admin: Client = None
-
 def get_supabase_clients():
-    global supabase, supabase_admin
-    if supabase is not None:
-        return supabase, supabase_admin
-
     url = st.secrets.get("SUPABASE_URL") or os.environ.get("SUPABASE_URL")
     key = st.secrets.get("SUPABASE_KEY") or os.environ.get("SUPABASE_KEY")
     service_key = st.secrets.get("SUPABASE_SERVICE_ROLE_KEY") or os.environ.get("SUPABASE_SERVICE_ROLE_KEY")
+
+    supabase = None
+    supabase_admin = None
 
     if url and key:
         try:
@@ -28,7 +24,6 @@ def get_supabase_clients():
     return supabase, supabase_admin
 
 def _messaggio_errore_italiano(e: Exception) -> str:
-    """Traduce le eccezioni più comuni di Supabase in messaggi leggibili in italiano."""
     testo = str(e).lower()
     if "invalid login credentials" in testo or "invalid_credentials" in testo:
         return "❌ Username/email o password errati."
@@ -42,12 +37,11 @@ def _messaggio_errore_italiano(e: Exception) -> str:
         return "❌ Troppi tentativi in poco tempo. Riprova tra qualche minuto."
     if "network" in testo or "timeout" in testo or "connection" in testo:
         return "❌ Errore di connessione al server. Riprova."
-    if "jwt" in testo or "expired" in testo:
+    if "jwt" in testo or "expired" in testo or "session" in testo:
         return "❌ Sessione scaduta. Effettua di nuovo l'accesso."
     return f"❌ Si è verificato un errore imprevisto: {e}"
 
 def login(identificativo: str, password: str) -> str | bool:
-    """Effettua il login con username OPPURE email ed esegue l'AAL Check di Supabase per la 2FA."""
     client, admin = get_supabase_clients()
     if not client:
         st.error("❌ Connessione al database non disponibile.")
@@ -60,7 +54,6 @@ def login(identificativo: str, password: str) -> str | bool:
             st.error("❌ Inserisci username/email e password.")
             return False
 
-        # 1. Risoluzione email se l'utente ha inserito lo username
         if "@" in identificativo:
             email = identificativo
         else:
@@ -86,18 +79,16 @@ def login(identificativo: str, password: str) -> str | bool:
                 st.error("❌ Nessuna email associata a questo username.")
                 return False
 
-        # 2. Authenticate user -> ottiene sessione AAL1
         try:
             res = client.auth.sign_in_with_password({"email": email, "password": password})
         except Exception as e:
             st.error(_messaggio_errore_italiano(e))
             return False
 
-        if not res or not res.user:
+        if not res or not res.user or not res.session:
             st.error("❌ Username/email o password errati.")
             return False
 
-        # 3. Recupera dati del profilo utente
         try:
             res_profile2 = client.table("profiles").select("*").eq("user_id", res.user.id).execute()
         except Exception as e:
@@ -118,17 +109,16 @@ def login(identificativo: str, password: str) -> str | bool:
             "role": profilo.get("role", "guest"),
         }
 
-        # 4. AAL CHECK (Authenticators Assurance Level Check)
-        # Recupera il livello di garanzia corrente (aal1 vs aal2) e i fattori verificati
+        st.session_state.supabase_access_token = res.session.access_token
+        st.session_state.supabase_refresh_token = res.session.refresh_token
+
         mfa_data = client.auth.mfa.get_authenticator_assurance_level()
         current_level = getattr(mfa_data, "current_level", "aal1")
         next_level = getattr(mfa_data, "next_level", "aal1")
 
-        # Elenca i fattori associati all'utente corrente
         factors_res = client.auth.mfa.list_factors()
         totp_factors = [f for f in getattr(factors_res, 'totp', []) if getattr(f, 'status', '') == 'verified']
 
-        # Se il livello richiesto è aal2 (o ci sono fattori TOTP verificati e siamo ancora a livello aal1)
         if (next_level == "aal2" or totp_factors) and current_level != "aal2":
             factor_id = totp_factors[0].id if totp_factors else getattr(mfa_data, "next_factor_id", None)
             
@@ -137,7 +127,6 @@ def login(identificativo: str, password: str) -> str | bool:
                 st.session_state.mfa_factor_id = factor_id
                 return "MFA_REQUIRED"
 
-        # Nessuna 2FA richiesta o già verificata a livello aal2
         st.session_state.user = user_data
         st.session_state.user["mfa_verified"] = True
         return True
@@ -147,9 +136,10 @@ def login(identificativo: str, password: str) -> str | bool:
         return False
 
 def verify_2fa_code(otp_code: str) -> bool:
-    """Valida il codice OTP a 6 cifre con Supabase MFA."""
     pending_user = st.session_state.get("mfa_pending_user")
     factor_id = st.session_state.get("mfa_factor_id")
+    access_token = st.session_state.get("supabase_access_token")
+    refresh_token = st.session_state.get("supabase_refresh_token")
 
     if not pending_user or not factor_id:
         st.error("❌ Nessuna sessione di login in attesa di 2FA.")
@@ -166,6 +156,9 @@ def verify_2fa_code(otp_code: str) -> bool:
         return False
 
     try:
+        if access_token and refresh_token:
+            client.auth.set_session(access_token, refresh_token)
+
         challenge_res = client.auth.mfa.challenge({"factor_id": factor_id})
         challenge_id = challenge_res.id
 
@@ -178,6 +171,8 @@ def verify_2fa_code(otp_code: str) -> bool:
         if verify_res and getattr(verify_res, "access_token", None):
             st.session_state.user = pending_user
             st.session_state.user["mfa_verified"] = True
+            st.session_state.supabase_access_token = verify_res.access_token
+            st.session_state.supabase_refresh_token = verify_res.refresh_token
 
             if "mfa_pending_user" in st.session_state:
                 del st.session_state["mfa_pending_user"]
@@ -193,23 +188,24 @@ def verify_2fa_code(otp_code: str) -> bool:
         return False
 
 def logout():
-    """Effettua il logout pulendo sia la sessione Supabase sia la sessione Streamlit."""
     client, _ = get_supabase_clients()
+    access_token = st.session_state.get("supabase_access_token")
+    refresh_token = st.session_state.get("supabase_refresh_token")
     if "user" in st.session_state or "mfa_pending_user" in st.session_state:
-        if client:
+        if client and access_token and refresh_token:
             try:
+                client.auth.set_session(access_token, refresh_token)
                 client.auth.sign_out()
             except Exception as e:
                 st.warning(f"⚠️ Disconnessione dal server non riuscita ({e}), ma la sessione locale è stata comunque chiusa.")
-        st.session_state.user = None
-        if "mfa_pending_user" in st.session_state:
-            del st.session_state["mfa_pending_user"]
-        if "mfa_factor_id" in st.session_state:
-            del st.session_state["mfa_factor_id"]
+        
+        keys_to_delete = ["user", "mfa_pending_user", "mfa_factor_id", "supabase_access_token", "supabase_refresh_token"]
+        for key in keys_to_delete:
+            if key in st.session_state:
+                del st.session_state[key]
         st.rerun()
 
 def register_user(email: str, password: str, **param) -> bool:
-    """Registra un nuovo utente creando la credenziale in Auth ed inserendo il profilo in 'profiles'."""
     client, admin = get_supabase_clients()
     if not admin:
         st.error("❌ Client Supabase Admin non configurato per la registrazione.")
