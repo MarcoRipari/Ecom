@@ -1,6 +1,9 @@
 import streamlit as st
 import os
 import hashlib
+import hmac
+import struct
+import time
 import base64
 
 supabase = None
@@ -78,6 +81,45 @@ def generate_totp_details_for_user(username, email=""):
         "qr_code_url": qr_code_url,
         "otpauth_url": otpauth_url
     }
+
+def verify_totp_secret_code(secret_b32: str, code: str, window: int = 1) -> bool:
+    """Verifies a 6-digit TOTP code against a Base32 secret key (RFC 6238 standard)."""
+    if not code or not str(code).strip().isdigit() or len(str(code).strip()) != 6:
+        return False
+
+    code = str(code).strip()
+    secret_b32 = secret_b32.upper().strip()
+
+    # Pad base32 string to multiple of 8 if needed
+    missing_padding = len(secret_b32) % 8
+    if missing_padding != 0:
+        secret_b32 += '=' * (8 - missing_padding)
+
+    try:
+        key_bytes = base64.b32decode(secret_b32, casefold=True)
+    except Exception:
+        return False
+
+    current_time = int(time.time())
+    time_step = 30
+
+    for i in range(-window, window + 1):
+        time_counter = (current_time // time_step) + i
+        time_bytes = struct.pack(">Q", time_counter)
+        hmac_digest = hmac.new(key_bytes, time_bytes, hashlib.sha1).digest()
+
+        offset = hmac_digest[-1] & 0x0F
+        binary_code = (
+            ((hmac_digest[offset] & 0x7F) << 24) |
+            ((hmac_digest[offset + 1] & 0xFF) << 16) |
+            ((hmac_digest[offset + 2] & 0xFF) << 8) |
+            (hmac_digest[offset + 3] & 0xFF)
+        )
+        expected_otp = f"{binary_code % 1000000:06d}"
+        if hmac.compare_digest(expected_otp, code):
+            return True
+
+    return False
 
 def login(identificativo: str, password: str, require_mfa: bool = True) -> bool:
     identificativo = (identificativo or "").strip()
@@ -205,14 +247,16 @@ def verify_2fa_code(otp_code: str) -> bool:
         except Exception:
             pass
 
-    if otp_code and len(otp_code) == 6 and otp_code.isdigit():
+    # Verify standard TOTP algorithm with user's base32 secret key
+    totp_secret = pending_user.get("totp_secret")
+    if totp_secret and verify_totp_secret_code(totp_secret, otp_code):
         st.session_state.user = pending_user
         st.session_state.user["mfa_verified"] = True
         if "mfa_pending_user" in st.session_state:
             del st.session_state["mfa_pending_user"]
         return True
     else:
-        st.error("❌ Codice 2FA non valido. Inserisci un codice OTP a 6 cifre.")
+        st.error("❌ Codice OTP non corretto o scaduto. Inserisci il codice generato dalla tua app Authenticator.")
         return False
 
 def register_user(email: str, password: str, **param) -> bool:
