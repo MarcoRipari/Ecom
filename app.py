@@ -45,8 +45,11 @@ if user is None:
                     st.success("✅ Autenticazione completata con successo!")
                     st.rerun()
 
-        if st.button("⬅️ Annulla e torna al login", use_container_width=True):
-            del st.session_state["mfa_pending_user"]
+        if st.button("⬅️️ Annulla e torna al login", use_container_width=True):
+            if "mfa_pending_user" in st.session_state:
+                del st.session_state["mfa_pending_user"]
+            if "mfa_factor_id" in st.session_state:
+                del st.session_state["mfa_factor_id"]
             st.rerun()
         st.stop()
 
@@ -60,14 +63,14 @@ if user is None:
             password = st.text_input("Password", type="password")
             login_btn = st.form_submit_button("Accedi", type="primary", use_container_width=True)
 
-        if login_btn:
-            res = auth.login(identificativo, password)
-            if res == "MFA_REQUIRED":
-                st.info("🔑 Codice 2FA richiesto. Inserisci il codice nella schermata successiva.")
-                st.rerun()
-            elif res is True:
-                st.success("✅ Accesso effettuato!")
-                st.rerun()
+            if login_btn:
+                res = auth.login(identificativo, password)
+                if res == "MFA_REQUIRED":
+                    st.info("🔑 Codice 2FA richiesto. Inserisci il codice nella schermata successiva.")
+                    st.rerun()
+                elif res is True:
+                    st.success("✅ Accesso effettuato!")
+                    st.rerun()
 
     st.stop()
 
@@ -75,8 +78,8 @@ if user is None:
 
 # Sidebar User Info & Logout
 with st.sidebar:
-    st.markdown(f"### 👋 Ciao, {user.get('nome', user.get('username')) if user else ''}")
-    st.caption(f"Ruolo: **{(user.get('role', 'utente') if user else '').upper()}**")
+    st.markdown(f"### 👋 Ciao, {user.get('nome') or user.get('username', '')}")
+    st.caption(f"Ruolo: **{(user.get('role', 'utente')).upper()}**")
     if st.button("🚪 Esci (Logout)", use_container_width=True):
         auth.logout()
 
