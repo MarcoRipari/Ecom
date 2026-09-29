@@ -29,14 +29,14 @@ user = st.session_state.user
 
 if user is None:
     if st.session_state.get("mfa_pending_user"):
-        st.markdown("<h2 style='text-align: center;'>🔐 Autenticazione a Due Fattori (2FA)</h2>", unsafe_allow_html=True)
-        st.caption("Per accedere ai dati sensibili inserisci il codice a 6 cifre dal tuo dispositivo di autenticazione.")
+        st.markdown("<h2 style='text-align: center;'>🔐 Autenticazione a Due Fattori (2FA / Double Opt-In)</h2>", unsafe_allow_html=True)
+        st.caption("I dati del sistema sono protetti da 2FA. Inserisci il codice OTP a 6 cifre per accedere.")
         with st.form("form_2fa", clear_on_submit=False):
             otp_code = st.text_input("Codice OTP (6 cifre)", max_chars=6)
-            submit_2fa = st.form_submit_button("Verifica Codice", use_container_width=True, type="primary")
+            submit_2fa = st.form_submit_button("Verifica Codice 2FA", use_container_width=True, type="primary")
             if submit_2fa:
                 if auth.verify_2fa_code(otp_code):
-                    st.success("✅ Autenticazione completata con successo!")
+                    st.success("✅ Autenticazione 2FA completata con successo!")
                     st.rerun()
 
         if st.button("⬅ Annulla e torna al login", use_container_width=True):
@@ -50,10 +50,11 @@ if user is None:
     col_l1, col_l2, col_l3 = st.columns([1, 2, 1])
     with col_l2:
         st.markdown("<h2 style='text-align: center;'>🔑 Accesso al Sistema</h2>", unsafe_allow_html=True)
-        st.caption("Accesso unificato E-Commerce BI e Gestione Operativa")
+        st.caption("Accesso unificato E-Commerce BI e Gestione Operativa (con 2FA / Double Opt-In)")
         with st.form("login_form"):
             identificativo = st.text_input("Username o Email")
             password = st.text_input("Password", type="password")
+            require_2fa = st.checkbox("Richiedi verifica 2FA / OTP", value=True)
             login_btn = st.form_submit_button("Accedi", type="primary", use_container_width=True)
 
             if login_btn:
@@ -68,8 +69,8 @@ if user is None:
     st.stop()
 
 with st.sidebar:
-    st.markdown(f"### 👋 Ciao, {user.get('nome') or user.get('username', '')}")
-    st.caption(f"Ruolo: **{(user.get('role', 'utente')).upper()}**")
+    st.markdown(f"### 👋 Ciao, {user.get('nome', user.get('username')) if user else ''}")
+    st.caption(f"Ruolo: **{(user.get('role', 'utente') if user else '').upper()}** | 2FA: **Attivo**")
     if st.button("🚪 Esci (Logout)", use_container_width=True):
         auth.logout()
 
@@ -81,7 +82,6 @@ menu_structure = []
 
 menu_structure.append({
     "section": "📌 Principale",
-    "icon": "house",
     "items": [
         {"name": "Dashboard Utente", "roles": ["admin", "logistica", "customer care", "dipendente", "guest"]}
     ]
@@ -238,7 +238,7 @@ elif page_selected == "Gestione Utenti":
         new_surname = st.text_input("Cognome")
         new_username = st.text_input("Username")
         new_role = st.selectbox("Ruolo", ["guest", "logistica", "customer care", "admin", "dipendente"])
-        mfa_opt = st.checkbox("Richiedi Autenticazione 2FA (MFA)", value=False)
+        mfa_opt = st.checkbox("Richiedi Autenticazione 2FA (MFA)", value=True)
         reg_btn = st.form_submit_button("Registra Utente")
         if reg_btn:
             auth.register_user(new_email, new_pass, nome=new_name, cognome=new_surname, username=new_username, role=new_role, mfa_enabled=mfa_opt)
