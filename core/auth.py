@@ -1,45 +1,27 @@
-import streamlit as st
 import os
-
-supabase = None
-supabase_admin = None
+import streamlit as st
 
 def get_supabase_clients():
-    global supabase, supabase_admin
-    if supabase is not None:
-        return supabase, supabase_admin
+    url = st.secrets.get("SUPABASE_URL") or os.environ.get("SUPABASE_URL")
+    key = st.secrets.get("SUPABASE_KEY") or os.environ.get("SUPABASE_KEY")
+    service_key = st.secrets.get("SUPABASE_SERVICE_ROLE_KEY") or os.environ.get("SUPABASE_SERVICE_ROLE_KEY")
 
-    url = None
-    key = None
-    service_key = None
-
-    try:
-        url = st.secrets.get("SUPABASE_URL")
-        key = st.secrets.get("SUPABASE_KEY")
-        service_key = st.secrets.get("SUPABASE_SERVICE_ROLE_KEY")
-    except Exception:
-        pass
-
-    if not url:
-        url = os.environ.get("SUPABASE_URL")
-    if not key:
-        key = os.environ.get("SUPABASE_KEY")
-    if not service_key:
-        service_key = os.environ.get("SUPABASE_SERVICE_ROLE_KEY")
+    client = None
+    admin = None
 
     if url and key:
         try:
             from supabase import create_client
-            supabase = create_client(url, key)
+            client = create_client(url, key)
             if service_key:
-                supabase_admin = create_client(url, service_key)
+                admin = create_client(url, service_key)
             else:
-                supabase_admin = supabase
+                admin = client
         except Exception:
-            supabase = None
-            supabase_admin = None
+            client = None
+            admin = None
 
-    return supabase, supabase_admin
+    return client, admin
 
 def _messaggio_errore_italiano(e: Exception) -> str:
     testo = str(e).lower()
@@ -55,7 +37,7 @@ def _messaggio_errore_italiano(e: Exception) -> str:
         return "❌ Troppi tentativi in poco tempo. Riprova tra qualche minuto."
     if "network" in testo or "timeout" in testo or "connection" in testo:
         return "❌ Errore di connessione al server. Riprova."
-    if "jwt" in testo or "expired" in testo:
+    if "jwt" in testo or "expired" in testo or "session" in testo:
         return "❌ Sessione scaduta. Effettua di nuovo l'accesso."
     return f"❌ Si è verificato un errore imprevisto: {e}"
 
@@ -68,7 +50,6 @@ def login(identificativo: str, password: str, require_mfa: bool = True) -> bool:
 
     client, admin = get_supabase_clients()
 
-    # Fallback for development / self-hosted without external secrets configured yet
     if not client:
         if (identificativo in ["admin", "admin@ecom.it"]) and password == "admin":
             user_data = {
@@ -103,7 +84,7 @@ def login(identificativo: str, password: str, require_mfa: bool = True) -> bool:
         if "@" in identificativo:
             email = identificativo
         else:
-            res_profile = client.table("profiles").select("*").ilike("username", identificativo).execute()
+            res_profile = client.table("profiles").select("user_id").ilike("username", identificativo).execute()
             if not res_profile.data:
                 st.error("❌ Username non trovato.")
                 return False
@@ -115,7 +96,7 @@ def login(identificativo: str, password: str, require_mfa: bool = True) -> bool:
                 return False
 
         res = client.auth.sign_in_with_password({"email": email, "password": password})
-        if not res or not res.user:
+        if not res or not res.user or not res.session:
             st.error("❌ Username/email o password errati.")
             return False
 
@@ -149,8 +130,17 @@ def login(identificativo: str, password: str, require_mfa: bool = True) -> bool:
 
 def verify_2fa_code(otp_code: str) -> bool:
     pending_user = st.session_state.get("mfa_pending_user")
-    if not pending_user:
-        st.error("Nessuna sessione di login in attesa di 2FA.")
+    factor_id = st.session_state.get("mfa_factor_id")
+    access_token = st.session_state.get("supabase_access_token")
+    refresh_token = st.session_state.get("supabase_refresh_token")
+
+    if not pending_user or not factor_id:
+        st.error("❌ Nessuna sessione di login in attesa di 2FA.")
+        return False
+
+    otp_code = (otp_code or "").strip()
+    if not otp_code or len(otp_code) != 6 or not otp_code.isdigit():
+        st.error("❌ Inserisci un codice OTP valido a 6 cifre.")
         return False
 
     client, _ = get_supabase_clients()
@@ -235,12 +225,19 @@ def register_user(email: str, password: str, **param) -> bool:
         return False
 
 def logout():
-    if "user" in st.session_state:
+    if "user" in st.session_state or "mfa_pending_user" in st.session_state:
         client, _ = get_supabase_clients()
-        if client:
+        access_token = st.session_state.get("supabase_access_token")
+        refresh_token = st.session_state.get("supabase_refresh_token")
+        if client and access_token and refresh_token:
             try:
+                client.auth.set_session(access_token, refresh_token)
                 client.auth.sign_out()
             except Exception:
                 pass
-        st.session_state.user = None
+
+        keys_to_delete = ["user", "mfa_pending_user", "mfa_factor_id", "supabase_access_token", "supabase_refresh_token"]
+        for key in keys_to_delete:
+            if key in st.session_state:
+                del st.session_state[key]
         st.rerun()
