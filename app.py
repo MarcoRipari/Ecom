@@ -5,6 +5,7 @@ import importlib.util
 from core import app_db, auth
 from reports.bi_selector import render_bi_period_selector
 
+# Page Configuration
 st.set_page_config(
     page_title="Pannello Unificato E-Commerce & Gestione",
     page_icon="🚀",
@@ -12,14 +13,17 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
+# Initialize SQLite operational database
 app_db.init_app_db()
 
+# Mobile detection helper
 try:
     _user_agent = (st.context.headers.get("User-Agent", "") or "")
 except Exception:
     _user_agent = ""
 IS_MOBILE = bool(re.search(r"Mobi|Android|iPhone|iPad|iPod|Windows Phone", _user_agent, re.IGNORECASE))
 
+# Session State Initialization
 if "user" not in st.session_state:
     st.session_state.user = None
 if "selected_page" not in st.session_state:
@@ -27,26 +31,44 @@ if "selected_page" not in st.session_state:
 
 user = st.session_state.user
 
+# --- LOGIN SCREEN ---
 if user is None:
+    # Handle pending 2FA challenge & QR Code enrollment
     if st.session_state.get("mfa_pending_user"):
-        st.markdown("<h2 style='text-align: center;'>🔐 Autenticazione a Due Fattori (2FA / Double Opt-In)</h2>", unsafe_allow_html=True)
-        st.caption("I dati del sistema sono protetti da 2FA. Inserisci il codice OTP a 6 cifre per accedere.")
-        with st.form("form_2fa", clear_on_submit=False):
-            otp_code = st.text_input("Codice OTP (6 cifre)", max_chars=6)
-            submit_2fa = st.form_submit_button("Verifica Codice 2FA", use_container_width=True, type="primary")
-            if submit_2fa:
-                if auth.verify_2fa_code(otp_code):
-                    st.success("✅ Autenticazione 2FA completata con successo!")
-                    st.rerun()
+        pending = st.session_state["mfa_pending_user"]
+        st.markdown("<h2 style='text-align: center;'>🔐 Autenticazione a Due Fattori (2FA / OTP)</h2>", unsafe_allow_html=True)
+        st.caption("Configura la tua app di autenticazione (Google Authenticator, Authy, Microsoft Authenticator) per accedere al sistema.")
 
-        if st.button("⬅ Annulla e torna al login", use_container_width=True):
-            keys_to_delete = ["mfa_pending_user", "mfa_factor_id", "supabase_access_token", "supabase_refresh_token"]
-            for key in keys_to_delete:
-                if key in st.session_state:
-                    del st.session_state[key]
+        col_q1, col_q2 = st.columns([1, 1])
+        with col_q1:
+            st.markdown("### 1️⃣ Scansiona il QR Code")
+            qr_url = pending.get("qr_code_url")
+            if qr_url:
+                st.image(qr_url, caption="Scansiona con la tua app 2FA", width=220)
+
+            totp_secret = pending.get("totp_secret", "")
+            if totp_secret:
+                st.markdown(f"**Oppure inserisci la chiave segreta a mano:**")
+                st.code(totp_secret, language="text")
+
+        with col_q2:
+            st.markdown("### 2️⃣ Inserisci il codice OTP")
+            st.write("Apri la tua app Authenticator ed inserisci il codice a 6 cifre generato:")
+            with st.form("form_2fa", clear_on_submit=False):
+                otp_code = st.text_input("Codice OTP (6 cifre)", max_chars=6, placeholder="123456")
+                submit_2fa = st.form_submit_button("Verifica Codice e Accedi", use_container_width=True, type="primary")
+                if submit_2fa:
+                    if auth.verify_2fa_code(otp_code):
+                        st.success("✅ Autenticazione 2FA completata con successo!")
+                        st.rerun()
+
+        st.divider()
+        if st.button("⬅️ Annulla e torna al login", use_container_width=True):
+            del st.session_state["mfa_pending_user"]
             st.rerun()
         st.stop()
 
+    # Main Login Form
     col_l1, col_l2, col_l3 = st.columns([1, 2, 1])
     with col_l2:
         st.markdown("<h2 style='text-align: center;'>🔑 Accesso al Sistema</h2>", unsafe_allow_html=True)
@@ -57,17 +79,20 @@ if user is None:
             require_2fa = st.checkbox("Richiedi verifica 2FA / OTP", value=True)
             login_btn = st.form_submit_button("Accedi", type="primary", use_container_width=True)
 
-            if login_btn:
-                res = auth.login(identificativo, password)
-                if res == "MFA_REQUIRED":
-                    st.info("🔑 Codice 2FA richiesto. Inserisci il codice nella schermata successiva.")
-                    st.rerun()
-                elif res is True:
-                    st.success("✅ Accesso effettuato!")
-                    st.rerun()
+        if login_btn:
+            res = auth.login(identificativo, password, require_mfa=require_2fa)
+            if res == "MFA_REQUIRED":
+                st.info("🔑 Configurazione / Codice 2FA richiesto. Inserisci il codice nella schermata successiva.")
+                st.rerun()
+            elif res is True:
+                st.success("✅ Accesso effettuato!")
+                st.rerun()
 
     st.stop()
 
+# --- LOGGED IN APPLICATION ---
+
+# Sidebar User Info & Logout
 with st.sidebar:
     st.markdown(f"### 👋 Ciao, {user.get('nome', user.get('username')) if user else ''}")
     st.caption(f"Ruolo: **{(user.get('role', 'utente') if user else '').upper()}** | 2FA: **Attivo**")
@@ -76,10 +101,12 @@ with st.sidebar:
 
     st.divider()
 
+# Define Navigation Menu according to Role
 role = (user.get("role", "guest") if user else "guest").lower()
 
 menu_structure = []
 
+# 1. Main Dashboard
 menu_structure.append({
     "section": "📌 Principale",
     "items": [
@@ -87,6 +114,7 @@ menu_structure.append({
     ]
 })
 
+# 2. E-Commerce BI Reports
 if role in ["admin", "logistica", "customer care", "guest"]:
     menu_structure.append({
         "section": "📊 Reports & BI",
@@ -105,6 +133,7 @@ if role in ["admin", "logistica", "customer care", "guest"]:
         ]
     })
 
+# 3. Catalogo & Ordini
 if role in ["admin", "logistica", "customer care"]:
     menu_structure.append({
         "section": "📋 Catalogo & Ordini",
@@ -115,6 +144,7 @@ if role in ["admin", "logistica", "customer care"]:
         ]
     })
 
+# 4. Giacenze
 if role in ["admin", "logistica", "customer care"]:
     menu_structure.append({
         "section": "📦 Giacenze",
@@ -124,6 +154,7 @@ if role in ["admin", "logistica", "customer care"]:
         ]
     })
 
+# 5. Foto SKUs
 if role in ["admin", "logistica", "customer care"]:
     menu_structure.append({
         "section": "📸 Foto SKUs",
@@ -134,6 +165,7 @@ if role in ["admin", "logistica", "customer care"]:
         ]
     })
 
+# 6. Ferie
 if role in ["admin", "dipendente"]:
     menu_structure.append({
         "section": "🌴 Gestione Ferie",
@@ -146,6 +178,7 @@ if role in ["admin", "dipendente"]:
         ]
     })
 
+# 7. Admin
 if role == "admin":
     menu_structure.append({
         "section": "⚙️ Amministrazione",
@@ -154,6 +187,7 @@ if role == "admin":
         ]
     })
 
+# Render Sidebar Navigation
 with st.sidebar:
     st.markdown("### 📋 Navigation")
     for sec in menu_structure:
@@ -167,10 +201,12 @@ with st.sidebar:
                         st.session_state.selected_page = item["name"]
                         st.rerun()
 
+# If on BI Reports, render BI period selector in sidebar
 bi_page_names = [item["name"] for sec in menu_structure if sec["section"] == "📊 Reports & BI" for item in sec["items"]]
 if st.session_state.selected_page in bi_page_names:
     render_bi_period_selector()
 
+# --- DYNAMIC PAGE ROUTING ---
 page_selected = st.session_state.selected_page
 
 if page_selected == "Dashboard Utente":
