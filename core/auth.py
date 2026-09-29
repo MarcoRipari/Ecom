@@ -51,29 +51,8 @@ def login(identificativo: str, password: str) -> str | bool:
     client, admin = get_supabase_clients()
 
     if not client:
-        if (identificativo in ["admin", "admin@ecom.it"]) and password == "admin":
-            st.session_state.user = {
-                "email": "admin@ecom.it",
-                "username": "admin",
-                "nome": "Admin",
-                "cognome": "User",
-                "role": "admin",
-                "mfa_verified": True
-            }
-            return True
-        elif (identificativo in ["dipendente", "dipendente@ecom.it"]) and password == "dipendente":
-            st.session_state.user = {
-                "email": "dipendente@ecom.it",
-                "username": "dipendente",
-                "nome": "Mario",
-                "cognome": "Rossi",
-                "role": "dipendente",
-                "mfa_verified": True
-            }
-            return True
-        else:
-            st.error("❌ Credenziali errate.")
-            return False
+        st.error("❌ Servizio di autenticazione non disponibile. Configura le credenziali di Supabase.")
+        return False
 
     try:
         if "@" in identificativo:
@@ -113,13 +92,19 @@ def login(identificativo: str, password: str) -> str | bool:
         st.session_state.supabase_access_token = res.session.access_token
         st.session_state.supabase_refresh_token = res.session.refresh_token
 
+        mfa_data = client.auth.mfa.get_authenticator_assurance_level()
+        current_level = getattr(mfa_data, "current_level", "aal1")
+        next_level = getattr(mfa_data, "next_level", "aal1")
+
         factors_res = client.auth.mfa.list_factors()
         verified_factors = [f for f in getattr(factors_res, 'totp', []) if getattr(f, 'status', '') == 'verified']
 
-        if verified_factors:
-            st.session_state.mfa_pending_user = user_data
-            st.session_state.mfa_factor_id = verified_factors[0].id
-            return "MFA_REQUIRED"
+        if (next_level == "aal2" or verified_factors) and current_level != "aal2":
+            factor_id = verified_factors[0].id if verified_factors else getattr(mfa_data, "next_factor_id", None)
+            if factor_id:
+                st.session_state.mfa_pending_user = user_data
+                st.session_state.mfa_factor_id = factor_id
+                return "MFA_REQUIRED"
 
         st.session_state.user = user_data
         st.session_state.user["mfa_verified"] = True
@@ -145,47 +130,41 @@ def verify_2fa_code(otp_code: str) -> bool:
         return False
 
     client, _ = get_supabase_clients()
-    if client:
-        try:
-            if access_token and refresh_token:
-                client.auth.set_session(access_token, refresh_token)
+    if not client:
+        st.error("❌ Connessione al server non disponibile.")
+        return False
 
-            challenge_res = client.auth.mfa.challenge({"factor_id": factor_id})
-            challenge_id = challenge_res.id
+    try:
+        if access_token and refresh_token:
+            client.auth.set_session(access_token, refresh_token)
 
-            verify_res = client.auth.mfa.verify({
-                "factor_id": factor_id,
-                "challenge_id": challenge_id,
-                "code": otp_code
-            })
+        challenge_res = client.auth.mfa.challenge({"factor_id": factor_id})
+        challenge_id = challenge_res.id
 
-            if verify_res and getattr(verify_res, "access_token", None):
-                st.session_state.user = pending_user
-                st.session_state.user["mfa_verified"] = True
-                st.session_state.supabase_access_token = verify_res.access_token
-                st.session_state.supabase_refresh_token = verify_res.refresh_token
+        verify_res = client.auth.mfa.verify({
+            "factor_id": factor_id,
+            "challenge_id": challenge_id,
+            "code": otp_code
+        })
 
-                if "mfa_pending_user" in st.session_state:
-                    del st.session_state["mfa_pending_user"]
-                if "mfa_factor_id" in st.session_state:
-                    del st.session_state["mfa_factor_id"]
-                return True
-            else:
-                st.error("❌ Codice 2FA errato o scaduto.")
-                return False
+        if verify_res and getattr(verify_res, "access_token", None):
+            st.session_state.user = pending_user
+            st.session_state.user["mfa_verified"] = True
+            st.session_state.supabase_access_token = verify_res.access_token
+            st.session_state.supabase_refresh_token = verify_res.refresh_token
 
-        except Exception as e:
-            st.error(_messaggio_errore_italiano(e))
+            if "mfa_pending_user" in st.session_state:
+                del st.session_state["mfa_pending_user"]
+            if "mfa_factor_id" in st.session_state:
+                del st.session_state["mfa_factor_id"]
+            return True
+        else:
+            st.error("❌ Codice 2FA errato o scaduto.")
             return False
 
-    if pending_user.get("username") in ["admin", "dipendente"] and otp_code == "123456":
-        st.session_state.user = pending_user
-        st.session_state.user["mfa_verified"] = True
-        del st.session_state["mfa_pending_user"]
-        return True
-
-    st.error("❌ Codice 2FA non valido.")
-    return False
+    except Exception as e:
+        st.error(_messaggio_errore_italiano(e))
+        return False
 
 def register_user(email: str, password: str, **param) -> bool:
     client, admin = get_supabase_clients()
@@ -249,7 +228,7 @@ def logout():
                 client.auth.sign_out()
             except Exception:
                 pass
-        
+
         keys_to_delete = ["user", "mfa_pending_user", "mfa_factor_id", "supabase_access_token", "supabase_refresh_token"]
         for key in keys_to_delete:
             if key in st.session_state:
