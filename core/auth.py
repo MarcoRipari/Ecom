@@ -1,45 +1,27 @@
 import os
 import streamlit as st
 
-supabase = None
-supabase_admin = None
-
 def get_supabase_clients():
-    global supabase, supabase_admin
-    if supabase is not None:
-        return supabase, supabase_admin
+    url = st.secrets.get("SUPABASE_URL") or os.environ.get("SUPABASE_URL")
+    key = st.secrets.get("SUPABASE_KEY") or os.environ.get("SUPABASE_KEY")
+    service_key = st.secrets.get("SUPABASE_SERVICE_ROLE_KEY") or os.environ.get("SUPABASE_SERVICE_ROLE_KEY")
 
-    url = None
-    key = None
-    service_key = None
-
-    try:
-        url = st.secrets.get("SUPABASE_URL")
-        key = st.secrets.get("SUPABASE_KEY")
-        service_key = st.secrets.get("SUPABASE_SERVICE_ROLE_KEY")
-    except Exception:
-        pass
-
-    if not url:
-        url = os.environ.get("SUPABASE_URL")
-    if not key:
-        key = os.environ.get("SUPABASE_KEY")
-    if not service_key:
-        service_key = os.environ.get("SUPABASE_SERVICE_ROLE_KEY")
+    client = None
+    admin = None
 
     if url and key:
         try:
             from supabase import create_client
-            supabase = create_client(url, key)
+            client = create_client(url, key)
             if service_key:
-                supabase_admin = create_client(url, service_key)
+                admin = create_client(url, service_key)
             else:
-                supabase_admin = supabase
+                admin = client
         except Exception:
-            supabase = None
-            supabase_admin = None
+            client = None
+            admin = None
 
-    return supabase, supabase_admin
+    return client, admin
 
 def _messaggio_errore_italiano(e: Exception) -> str:
     testo = str(e).lower()
@@ -55,7 +37,7 @@ def _messaggio_errore_italiano(e: Exception) -> str:
         return "❌ Troppi tentativi in poco tempo. Riprova tra qualche minuto."
     if "network" in testo or "timeout" in testo or "connection" in testo:
         return "❌ Errore di connessione al server. Riprova."
-    if "jwt" in testo or "expired" in testo:
+    if "jwt" in testo or "expired" in testo or "session" in testo:
         return "❌ Sessione scaduta. Effettua di nuovo l'accesso."
     return f"❌ Si è verificato un errore imprevisto: {e}"
 
@@ -97,7 +79,7 @@ def login(identificativo: str, password: str) -> str | bool:
         if "@" in identificativo:
             email = identificativo
         else:
-            res_profile = client.table("profiles").select("*").ilike("username", identificativo).execute()
+            res_profile = client.table("profiles").select("user_id").ilike("username", identificativo).execute()
             if not res_profile.data:
                 st.error("❌ Username non trovato.")
                 return False
@@ -109,7 +91,7 @@ def login(identificativo: str, password: str) -> str | bool:
                 return False
 
         res = client.auth.sign_in_with_password({"email": email, "password": password})
-        if not res or not res.user:
+        if not res or not res.user or not res.session:
             st.error("❌ Username/email o password errati.")
             return False
 
@@ -119,7 +101,6 @@ def login(identificativo: str, password: str) -> str | bool:
             return False
 
         profilo = res_profile2.data[0]
-        
         user_data = {
             "id": res.user.id,
             "email": email,
@@ -129,7 +110,9 @@ def login(identificativo: str, password: str) -> str | bool:
             "role": profilo.get("role", "guest"),
         }
 
-        # Controllo dei fattori 2FA registrati su Supabase Auth
+        st.session_state.supabase_access_token = res.session.access_token
+        st.session_state.supabase_refresh_token = res.session.refresh_token
+
         factors_res = client.auth.mfa.list_factors()
         verified_factors = [f for f in getattr(factors_res, 'totp', []) if getattr(f, 'status', '') == 'verified']
 
@@ -149,7 +132,9 @@ def login(identificativo: str, password: str) -> str | bool:
 def verify_2fa_code(otp_code: str) -> bool:
     pending_user = st.session_state.get("mfa_pending_user")
     factor_id = st.session_state.get("mfa_factor_id")
-    
+    access_token = st.session_state.get("supabase_access_token")
+    refresh_token = st.session_state.get("supabase_refresh_token")
+
     if not pending_user or not factor_id:
         st.error("❌ Nessuna sessione di login in attesa di 2FA.")
         return False
@@ -162,6 +147,9 @@ def verify_2fa_code(otp_code: str) -> bool:
     client, _ = get_supabase_clients()
     if client:
         try:
+            if access_token and refresh_token:
+                client.auth.set_session(access_token, refresh_token)
+
             challenge_res = client.auth.mfa.challenge({"factor_id": factor_id})
             challenge_id = challenge_res.id
 
@@ -174,7 +162,9 @@ def verify_2fa_code(otp_code: str) -> bool:
             if verify_res and getattr(verify_res, "access_token", None):
                 st.session_state.user = pending_user
                 st.session_state.user["mfa_verified"] = True
-                
+                st.session_state.supabase_access_token = verify_res.access_token
+                st.session_state.supabase_refresh_token = verify_res.refresh_token
+
                 if "mfa_pending_user" in st.session_state:
                     del st.session_state["mfa_pending_user"]
                 if "mfa_factor_id" in st.session_state:
@@ -188,7 +178,6 @@ def verify_2fa_code(otp_code: str) -> bool:
             st.error(_messaggio_errore_italiano(e))
             return False
 
-    # Fallback solo se Supabase non è configurato (ambiente dev offline)
     if pending_user.get("username") in ["admin", "dipendente"] and otp_code == "123456":
         st.session_state.user = pending_user
         st.session_state.user["mfa_verified"] = True
@@ -250,16 +239,19 @@ def register_user(email: str, password: str, **param) -> bool:
         return False
 
 def logout():
-    if "user" in st.session_state:
+    if "user" in st.session_state or "mfa_pending_user" in st.session_state:
         client, _ = get_supabase_clients()
-        if client:
+        access_token = st.session_state.get("supabase_access_token")
+        refresh_token = st.session_state.get("supabase_refresh_token")
+        if client and access_token and refresh_token:
             try:
+                client.auth.set_session(access_token, refresh_token)
                 client.auth.sign_out()
             except Exception:
                 pass
-        st.session_state.user = None
-        if "mfa_pending_user" in st.session_state:
-            del st.session_state["mfa_pending_user"]
-        if "mfa_factor_id" in st.session_state:
-            del st.session_state["mfa_factor_id"]
+        
+        keys_to_delete = ["user", "mfa_pending_user", "mfa_factor_id", "supabase_access_token", "supabase_refresh_token"]
+        for key in keys_to_delete:
+            if key in st.session_state:
+                del st.session_state[key]
         st.rerun()
