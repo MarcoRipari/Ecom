@@ -21,6 +21,8 @@ gspread-formatting
 pydrive2
 
 # 🔎 Embedding e Retrieval (RAG)
+--extra-index-url https://download.pytorch.org/whl/cpu
+torch
 sentence-transformers
 faiss-cpu
 
