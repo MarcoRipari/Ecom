@@ -38,6 +38,7 @@ class TestUnifiedApp(unittest.TestCase):
         self.assertEqual(retrieved, widgets)
 
     def test_ferie_operations(self):
+        app_db.ensure_dipendente_exists("Mario Rossi")
         df_dip = ferie_db.get_dipendenti()
         self.assertFalse(df_dip.empty)
 

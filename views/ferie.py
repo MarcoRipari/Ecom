@@ -22,6 +22,7 @@ from functions.ferie_db import (
     add_ferie_record,
     MESI_IT_LUNGO
 )
+from core.app_db import ensure_dipendente_exists, delete_dipendente
 
 def calendario_ferie_mensile():
     st.subheader("🗓️ Calendario Ferie")
@@ -193,6 +194,10 @@ def aggiungi_ferie():
     dipendenti = get_dipendenti()
     nomi_dipendenti = dipendenti['NOME'].tolist()
 
+    if not nomi_dipendenti:
+        st.warning("Nessun dipendente trovato. Aggiungi prima un dipendente nella scheda 'Gestione dipendenti'.")
+        return
+
     modalita = st.radio(
         "Tipo di inserimento",
         ["Giorno intero", "Entrata posticipata / Uscita anticipata"],
@@ -273,7 +278,25 @@ def modifica_ferie_totali_modal(nome, ferie_attuale, orario_attuale):
 
 def gestione_dipendenti():
     st.header("Gestione dipendenti")
+
+    with st.expander("➕ Aggiungi un nuovo Dipendente", expanded=False):
+        with st.form("form_nuovo_dipendente"):
+            nuovo_nome = st.text_input("Nome e Cognome Dipendente")
+            totale_ferie_nuovo = st.number_input("Totale Giorni Ferie Annui", value=26, min_value=0)
+            btn_crea = st.form_submit_button("Crea Dipendente")
+            if btn_crea:
+                if nuovo_nome.strip():
+                    ensure_dipendente_exists(nuovo_nome.strip(), totale_ferie_nuovo)
+                    st.success(f"✅ Dipendente '{nuovo_nome.strip()}' aggiunto correttamente!")
+                    st.rerun()
+                else:
+                    st.error("Inserisci un nome valido per il dipendente.")
+
     dipendenti = get_dipendenti()
+
+    if dipendenti.empty:
+        st.info("Nessun dipendente registrato. Usa il form in alto per aggiungerne uno.")
+        return
 
     cols = st.columns(3)
     for i, dipendente in enumerate(dipendenti.itertuples(index=False)):
@@ -292,17 +315,28 @@ def gestione_dipendenti():
                 </div>
             """, unsafe_allow_html=True)
 
-            if st.button(f"Modifica {dipendente.NOME}", key=f"edit_{dipendente.NOME}", use_container_width=True):
-                modifica_ferie_totali_modal(dipendente.NOME, dipendente.TOTALE, orario_dip)
+            c1, c2 = st.columns(2)
+            with c1:
+                if st.button(f"Modifica", key=f"edit_{dipendente.NOME}", use_container_width=True):
+                    modifica_ferie_totali_modal(dipendente.NOME, dipendente.TOTALE, orario_dip)
+            with c2:
+                if st.button(f"Elimina", key=f"del_{dipendente.NOME}", use_container_width=True):
+                    delete_dipendente(dipendente.NOME)
+                    st.success(f"Eliminato {dipendente.NOME}")
+                    st.rerun()
 
 def dashboard_dipendente():
     user = st.session_state.get("user", {}) or {}
     nome_utente = f"{(user.get('nome') or '').strip()} {(user.get('cognome') or '').strip()}".strip()
+    if not nome_utente:
+        nome_utente = user.get("username", "")
 
     st.header("Le mie ferie")
     if not nome_utente:
         st.error("Non riesco a determinare il tuo nome dal profilo utente.")
         return
+
+    ensure_dipendente_exists(nome_utente)
 
     df_dipendenti = get_dipendenti()
     df_storico = get_ferie_storico()

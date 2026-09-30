@@ -25,9 +25,15 @@ from functions.descrizioni import (
     generate_all_prompts, calcola_tokens, LANG_LABELS, LANG_NAMES
 )
 
-DESC_SHEET_ID = st.secrets.get("DESC_GSHEET_ID")
+DESC_SHEET_ID = None
+try:
+    DESC_SHEET_ID = st.secrets.get("DESC_GSHEET_ID")
+except Exception:
+    DESC_SHEET_ID = None
 
 def append_logs(sheet_id, logs):
+    if not sheet_id:
+        return
     sheet = get_sheet(sheet_id, "logs")
     if not logs:
         return
@@ -117,8 +123,7 @@ def genera_descrizioni():
             with c2:
                 selected_labels = st.multiselect("Lingue", options=list(LANG_LABELS.keys()), default=["Italiano"])
                 selected_langs = [LANG_LABELS[l] for l in selected_labels]
-                #selected_tones = st.multiselect("Tono", ["informale", "conversazionale", "chiaro e diretto", "professionale", "amichevole", "accattivante", "descrittivo", "tecnico", "ironico", "minimal", "user friendly", "SEO-friendly", "SEO-optimized"], default=["informale", "conversazionale", "chiaro e diretto", "user friendly", "SEO-friendly", "SEO-optimized"])
-                selected_tones = st.multiselect("Tono", ["descrittivo", "chiaro e diretto", "professionale", "amichevole", "accattivante", "minimal", "editoriale", "narrativo"], default=["descrittivo", "chiaro e diretto", "editoriale"])
+                selected_tones = st.multiselect("Tono", ["descrittivo", "chiaro e diretto", "editoriale"], default=["descrittivo", "chiaro e diretto", "editoriale"])
             with c3:
                 desc_lunga_length = st.select_slider("Parole (Lunga)", options=["20", "40", "60", "80", "100"], value="60")
                 desc_breve_length = st.select_slider("Parole (Breve)", options=["10", "20", "30", "40", "50"], value="20")
@@ -133,33 +138,34 @@ def genera_descrizioni():
         if st.session_state.get("generate"):
             logs = []
             try:
-                with st.spinner("📚 Preparazione Indice FAISS..."):
-                    if marchio == "FM JUNIOR":
-                        tab_storico = f"STORICO_FM_JUNIOR"
-                    elif marchio == "WZ BIMBO":
-                        tab_storico = f"STORICO_WZ_BIMBO"
-                    else:
-                        tab_storico = f"STORICO_{marchio}"
+                if DESC_SHEET_ID:
+                    with st.spinner("📚 Preparazione Indice FAISS..."):
+                        if marchio == "FM JUNIOR":
+                            tab_storico = f"STORICO_FM_JUNIOR"
+                        elif marchio == "WZ BIMBO":
+                            tab_storico = f"STORICO_WZ_BIMBO"
+                        else:
+                            tab_storico = f"STORICO_{marchio}"
 
-                    data_sheet = get_sheet(DESC_SHEET_ID, tab_storico)
-                    df_storico = pd.DataFrame(data_sheet.get_all_records()).tail(500)
-                    index, index_df = build_faiss_index(df_storico, st.session_state.col_weights)
-                    st.session_state["faiss_index"] = (index, index_df)
+                        data_sheet = get_sheet(DESC_SHEET_ID, tab_storico)
+                        df_storico = pd.DataFrame(data_sheet.get_all_records()).tail(500)
+                        index, index_df = build_faiss_index(df_storico, st.session_state.col_weights)
+                        st.session_state["faiss_index"] = (index, index_df)
 
-                # ✅ Verifica righe già generate
                 st.info("🔄 Verifica righe esistenti...")
                 existing_data = {}
                 already_generated = {lang: [] for lang in selected_langs}
                 rows_to_generate = []
 
-                for lang in selected_langs:
-                    try:
-                        tab_df = pd.DataFrame(get_sheet(DESC_SHEET_ID, lang).get_all_records())
-                        tab_df = tab_df[["SKU", "Description", "Description2"]].dropna(subset=["SKU"])
-                        tab_df["SKU"] = tab_df["SKU"].astype(str)
-                        existing_data[lang] = tab_df.set_index("SKU")
-                    except:
-                        existing_data[lang] = pd.DataFrame(columns=["Description", "Description2"])
+                if DESC_SHEET_ID:
+                    for lang in selected_langs:
+                        try:
+                            tab_df = pd.DataFrame(get_sheet(DESC_SHEET_ID, lang).get_all_records())
+                            tab_df = tab_df[["SKU", "Description", "Description2"]].dropna(subset=["SKU"])
+                            tab_df["SKU"] = tab_df["SKU"].astype(str)
+                            existing_data[lang] = tab_df.set_index("SKU")
+                        except:
+                            existing_data[lang] = pd.DataFrame(columns=["Description", "Description2"])
 
                 prefix_to_output = {lang: {} for lang in selected_langs}
                 unique_sku_prefixes = {}
@@ -174,7 +180,7 @@ def genera_descrizioni():
                             found_in_sheets = False
                             break
 
-                    if found_in_sheets:
+                    if found_in_sheets and existing_data:
                         for lang in selected_langs:
                             desc = existing_data[lang].loc[sku]
                             out_row = row.to_dict()
@@ -191,7 +197,7 @@ def genera_descrizioni():
                 all_prompts = []
                 with st.spinner("✍️ Creazione Prompt..."):
                     for _, row in df_to_gen.iterrows():
-                        simili = retrieve_similar(row, index_df, index, k=k_simili, col_weights=st.session_state.col_weights) if k_simili > 0 else None
+                        simili = retrieve_similar(row, index_df, index, k=k_simili, col_weights=st.session_state.col_weights) if k_simili > 0 and "faiss_index" in st.session_state else None
                         prompt = build_unified_prompt(row, st.session_state.col_display_names, selected_langs, selected_tones, desc_lunga_length, desc_breve_length, simili=simili, marchio=marchio)
                         all_prompts.append(prompt)
 
@@ -203,7 +209,6 @@ def genera_descrizioni():
                         asyncio.set_event_loop(loop)
                     results = loop.run_until_complete(generate_all_prompts(all_prompts, use_model, selected_langs))
 
-                # Parsing risultati
                 all_outputs = already_generated.copy()
                 for i, (idx_in_df, row) in enumerate(df_to_gen.iterrows()):
                     res = results.get(i, {})
@@ -226,7 +231,7 @@ def genera_descrizioni():
                         prefix_to_output[lang][prefix] = out_row
 
                     logs.append({
-                        "utente": st.session_state.user.get("username", "unknown"),
+                        "utente": st.session_state.get("user", {}).get("username", "unknown"),
                         "sku": sku,
                         "status": "OK",
                         "prompt": all_prompts[i],
@@ -235,11 +240,10 @@ def genera_descrizioni():
                         **res.get("usage", {})
                     })
 
-                # Riempimento righe con lo stesso prefisso
                 for i, row in df_input.iterrows():
                     sku = str(row.get("SKU", "")).strip()
                     prefix = sku[:13]
-                    if i not in rows_to_generate and prefix in prefix_to_output[selected_langs[0]]:
+                    if i not in rows_to_generate and prefix in prefix_to_output.get(selected_langs[0], {}):
                         for lang in selected_langs:
                             new_row = row.copy().to_dict()
                             cached = prefix_to_output[lang][prefix]
@@ -247,7 +251,6 @@ def genera_descrizioni():
                             new_row["Description2"] = cached["Description2"]
                             all_outputs[lang].append(new_row)
 
-                # Salvataggio e ZIP
                 with st.spinner("📤 Salvataggio e creazione ZIP..."):
 
                     mem_zip = BytesIO()
@@ -265,26 +268,29 @@ def genera_descrizioni():
                             })
                             zf.writestr(f"descrizioni_{lang}.csv", df_export.to_csv(index=False).encode("utf-8"))
 
-                            # Update Google Sheet
-                            try:
-                                sheet_df = pd.DataFrame(get_sheet(DESC_SHEET_ID, lang).get_all_records())
-                                existing_skus = set(sheet_df["SKU"].astype(str).tolist())
-                            except:
-                                existing_skus = set()
-                            df_new = df_out[~df_out["SKU"].astype(str).isin(existing_skus)]
-                            if not df_new.empty:
-                                append_to_sheet(DESC_SHEET_ID, lang, df_new)
+                            if DESC_SHEET_ID:
+                                try:
+                                    sheet_df = pd.DataFrame(get_sheet(DESC_SHEET_ID, lang).get_all_records())
+                                    existing_skus = set(sheet_df["SKU"].astype(str).tolist())
+                                except:
+                                    existing_skus = set()
+                                df_new = df_out[~df_out["SKU"].astype(str).isin(existing_skus)]
+                                if not df_new.empty:
+                                    append_to_sheet(DESC_SHEET_ID, lang, df_new)
 
-                    append_logs(DESC_SHEET_ID, logs)
+                    if DESC_SHEET_ID:
+                        append_logs(DESC_SHEET_ID, logs)
 
                     mem_zip.seek(0)
                     now = datetime.now(ZoneInfo("Europe/Rome"))
                     file_name = f"descrizioni_{now.strftime('%d-%m-%Y_%H-%M-%S')}.zip"
 
-                    # Dropbox
-                    access_token = get_dropbox_access_token()
-                    dbx = dbx_lib.Dropbox(access_token)
-                    upload_to_dropbox(dbx, "/CATALOGO/DESCRIZIONI", file_name, mem_zip.getvalue())
+                    try:
+                        access_token = get_dropbox_access_token()
+                        dbx = dbx_lib.Dropbox(access_token)
+                        upload_to_dropbox(dbx, "/CATALOGO/DESCRIZIONI", file_name, mem_zip.getvalue())
+                    except Exception:
+                        pass
 
                 st.success("✅ Generazione completata!")
                 st.download_button("📥 Scarica ZIP", mem_zip, file_name=file_name)

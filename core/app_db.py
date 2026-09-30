@@ -84,23 +84,28 @@ def init_app_db(db_path=None):
         )
     """)
 
-    # Populate default sample dipendenti if empty
-    cur.execute("SELECT COUNT(*) as count FROM dipendenti")
-    if cur.fetchone()["count"] == 0:
-        sample_dipendenti = [
-            ("Mario Rossi", 26, "08:30", "12:30", "14:00", "18:00"),
-            ("Luigi Bianchi", 26, "08:30", "12:30", "14:00", "18:00"),
-            ("Elena Verdi", 26, "09:00", "13:00", "14:30", "18:30")
-        ]
-        cur.executemany("""
-            INSERT INTO dipendenti (nome, totale_ferie, mattina_inizio, mattina_fine, pomeriggio_inizio, pomeriggio_fine)
-            VALUES (?, ?, ?, ?, ?, ?)
-        """, sample_dipendenti)
-
     conn.commit()
     conn.close()
 
 # --- Helper DB functions for Ferie & Dipendenti ---
+
+def ensure_dipendente_exists(nome, totale_ferie=26):
+    """Ensures a employee record exists in dipendenti table for the logged in user or newly registered user."""
+    nome = (nome or "").strip()
+    if not nome:
+        return False
+    conn = get_connection()
+    cur = conn.cursor()
+    cur.execute("SELECT id FROM dipendenti WHERE LOWER(nome) = LOWER(?)", (nome,))
+    row = cur.fetchone()
+    if not row:
+        cur.execute("""
+            INSERT INTO dipendenti (nome, totale_ferie, mattina_inizio, mattina_fine, pomeriggio_inizio, pomeriggio_fine)
+            VALUES (?, ?, '08:30', '12:30', '14:00', '18:00')
+        """, (nome, totale_ferie))
+        conn.commit()
+    conn.close()
+    return True
 
 def get_dipendenti_df():
     conn = get_connection()
@@ -173,6 +178,15 @@ def update_dipendente_orario(nome, orario_dict):
         orario_dict.get("pomeriggio_fine", "18:00"),
         nome
     ))
+    conn.commit()
+    conn.close()
+    return True
+
+def delete_dipendente(nome):
+    conn = get_connection()
+    cur = conn.cursor()
+    cur.execute("DELETE FROM dipendenti WHERE nome = ?", (nome,))
+    cur.execute("DELETE FROM ferie_storico WHERE nome = ?", (nome,))
     conn.commit()
     conn.close()
     return True
